@@ -29,6 +29,7 @@ dependencies = [
     "matplotlib",
     "msgpack",
     "msgpack_numpy",
+    "websockets",
 
     "i2rt",
     "uvicorn",
@@ -90,6 +91,7 @@ lint.ignore = [
     "F405",
     "F841",
     "PLC0414",  # Import alias does not rename variable. (this is used for exporting names)
+    "PLC0415",  # Lazy imports inside methods (intentional for optional deps)
     "PLC1901",  # Use falsey strings.
     "PLR0911",  # Too many return statements.
     "PLR0912",  # Too many branches.

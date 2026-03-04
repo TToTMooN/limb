@@ -1,0 +1,72 @@
+# Generic WebSocket policy server config (for use with docs/policy_server_spec.md).
+# Change host to your GPU machine running the policy server.
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 100.0
+
+sensors:
+  cameras:
+    left_wrist_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "409122274017"
+    right_wrist_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "409122274543"
+    # head_camera:
+    #     _target_: limb.sensors.cameras.camera.CameraNode
+    #     camera:
+    #         _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+    #         serial_number: "215122256240"
+
+robots:
+  left: ["robot_configs/yam/left.yaml"]
+  right: ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+
+agent:
+  _target_: limb.agents.policy_learning.policy_agent.YamPolicyAgent
+  client:
+    _target_: limb.agents.policy_learning.policy_client.WebSocketPolicyClient
+    host: "0.0.0.0"     # change to GPU machine IP
+    port: 8000
+  obs_transform:
+    _target_: limb.agents.policy_learning.transforms.ObsTransform
+    state_keys:
+      - "left-joint_pos"
+      - "left-gripper_pos"
+      - "right-joint_pos"
+      - "right-gripper_pos"
+    image_keys:
+      left_camera: "left_wrist_camera-images-rgb"
+      right_camera: "right_wrist_camera-images-rgb"
+      # top_camera: "head_camera-images-rgb"
+    image_size: [224, 224]
+    image_format: "uint8_hwc"
+  action_transform:
+    _target_: limb.agents.policy_learning.transforms.ActionTransform
+    arm_names: ["left", "right"]
+    joints_per_arm: 7
+    include_vel: false
+    gripper_clip: [0.0, 1.0]
+  action_horizon: 25
+  smoothing_window: 4
+  async_inference: true
+
+recording:
+  _target_: limb.recording.episode_recorder.EpisodeRecorder
+  base_dir: "recordings"
+  recording_fps: 30
+  auto_start: true
+  ee_frame_names:
+    left: "ee_link"
+    right: "ee_link"
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]

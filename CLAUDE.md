@@ -26,8 +26,11 @@ limb/
       yam_gello_agent.py  # GELLO Dynamixel teleop (keep)
       yam_vr_agent.py     # Pico VR teleop (keep)
     policy_learning/
-      async_pi0_agent.py  # π0 VLA policy client (keep)
-      diffusion_policy_agent.py  # Diffusion policy client (keep)
+      policy_client.py    # PolicyClient protocol + OpenPI/WebSocket clients
+      transforms.py       # Obs/action transforms (YAML-configurable)
+      action_chunk_manager.py  # Action chunk buffering + temporal smoothing
+      policy_agent.py     # YamPolicyAgent — composes client+transforms+chunking
+      async_pi0_agent.py  # (deprecated) Legacy π0 client
   robots/
     robot.py              # Robot protocol
     yam_motor_chain_robot.py  # YAM CAN bus driver (keep)
@@ -43,6 +46,8 @@ limb/
   visualization/
     viser_base.py         # IK + URDF visualization
     viser_monitor.py      # Camera feeds + recording
+  recording/
+    episode_recorder.py   # Raw episode recording (states/actions/video)
   sensors/
     cameras/
       camera.py           # Camera protocol
@@ -81,7 +86,8 @@ launch.py
 | Viser teleop | `agents/teleoperation/yam_viser_agent.py` | Web UI teleop |
 | GELLO teleop | `agents/teleoperation/yam_gello_agent.py` | Dynamixel leader |
 | VR teleop | `agents/teleoperation/yam_vr_agent.py` | Pico headset |
-| VLA policies | `agents/policy_learning/async_pi0_agent.py`, `diffusion_policy_agent.py` | Policy deployment |
+| Policy agent | `agents/policy_learning/policy_agent.py`, `policy_client.py`, `transforms.py` | VLA policy deployment |
+| Episode recording | `recording/episode_recorder.py` | Raw data capture (states/actions/video) |
 | Viser monitor | `visualization/viser_monitor.py` | Camera + URDF display |
 | Camera drivers | `sensors/cameras/*.py` | Observation space |
 | Point cloud utils | `utils/depth_utils.py`, `sensors/cameras/camera_utils.py` | Depth obs |
@@ -124,11 +130,11 @@ uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml
 ### VLA Policy Deployment
 
 ```bash
-# π0 policy (requires pi0 server)
+# π0 policy via OpenPI (requires OpenPI server at host:port)
 uv run limb/envs/launch.py --config_path configs/yam_pi0_bimanual.yaml
 
-# Diffusion policy (requires websocket server)
-uv run limb/envs/launch.py --config_path configs/yam_diffusion_bimanual.yaml
+# Generic policy server (requires server implementing docs/policy_server_spec.md)
+uv run limb/envs/launch.py --config_path configs/yam_policy_bimanual.yaml
 ```
 
 ### GELLO Network Mode (R1 Lite remote)

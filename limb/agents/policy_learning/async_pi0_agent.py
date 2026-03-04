@@ -1,9 +1,18 @@
 import threading
 import time
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
 import numpy as np
+
+warnings.warn(
+    "async_pi0_agent.AsyncDiffusionAgent is deprecated. "
+    "Use limb.agents.policy_learning.policy_agent.YamPolicyAgent with OpenPIClient instead. "
+    "See configs/yam_pi0_bimanual.yaml for example.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 from dm_env.specs import Array
 from openpi_client import action_chunk_broker, image_tools
 from openpi_client import websocket_client_policy as _websocket_client_policy

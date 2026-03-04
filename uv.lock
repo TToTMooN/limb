@@ -928,6 +928,7 @@ dependencies = [
     { name = "tyro" },
     { name = "uvicorn" },
     { name = "viser" },
+    { name = "websockets" },
     { name = "xdof-sdk" },
     { name = "yourdfpy" },
 ]
@@ -969,6 +970,7 @@ requires-dist = [
     { name = "tyro" },
     { name = "uvicorn" },
     { name = "viser", specifier = "==1.0.16" },
+    { name = "websockets" },
     { name = "xdof-sdk" },
     { name = "yourdfpy" },
 ]
