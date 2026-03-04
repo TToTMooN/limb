@@ -4,6 +4,7 @@
 
 Minimal, high-frequency control stack for **YAM bimanual arms** (I2RT).
 Primary use cases: teleoperation for data collection, and running VLA policies.
+limb is the "robot side" — any VLA framework (OpenPI, LeRobot, etc.) can plug into it.
 
 ---
 
@@ -11,104 +12,93 @@ Primary use cases: teleoperation for data collection, and running VLA policies.
 
 ```
 configs/                  # YAML launch configs (OmegaConf)
-robot_configs/            # Per-arm hardware specs
+robot_configs/            # Per-arm hardware specs (CAN IDs, PID gains, limits)
 limb/
   envs/
-    launch.py             # Main entry point
+    launch.py             # Main entry point + control loop
     robot_env.py          # dm_env environment wrapper
     configs/
-      loader.py           # YAML → dataclass
+      loader.py           # YAML → OmegaConf dict
       instantiate.py      # _target_ → Python class
+  core/
+    observation.py        # Typed observation dataclasses
   agents/
-    agent.py              # Agent protocol
+    agent.py              # Agent protocol (act, action_spec)
     teleoperation/
-      yam_viser_agent.py  # Viser web-UI teleop (keep)
-      yam_gello_agent.py  # GELLO Dynamixel teleop (keep)
-      yam_vr_agent.py     # Pico VR teleop (keep)
+      yam_viser_agent.py  # Viser web-UI teleop
+      yam_gello_agent.py  # GELLO Dynamixel teleop
+      yam_vr_agent.py     # Pico VR teleop
     policy_learning/
       policy_client.py    # PolicyClient protocol + OpenPI/WebSocket clients
       transforms.py       # Obs/action transforms (YAML-configurable)
       action_chunk_manager.py  # Action chunk buffering + temporal smoothing
       policy_agent.py     # YamPolicyAgent — composes client+transforms+chunking
-      async_pi0_agent.py  # (deprecated) Legacy π0 client
   robots/
     robot.py              # Robot protocol
-    yam_motor_chain_robot.py  # YAM CAN bus driver (keep)
+    yam_motor_chain_robot.py  # YAM CAN bus driver
     inverse_kinematics/
-      yam_pink.py         # Pinocchio QP IK (keep)
-      yam_pyroki.py       # JAX IK (keep)
+      yam_pink.py         # Pinocchio QP IK
+      yam_pyroki.py       # JAX IK
     utils.py              # Rate limiter, Timeout
   devices/
-    dynamixel_reader.py          # USB GELLO (keep)
-    network_dynamixel_reader.py  # Network GELLO / R1 Lite (keep)
-    joycon_gripper_reader.py     # JoyCon gripper control (keep)
-    xr_client.py                 # XRoboToolkit VR client (keep)
+    dynamixel_reader.py          # USB GELLO reader
+    network_dynamixel_reader.py  # Network GELLO / R1 Lite
+    joycon_gripper_reader.py     # JoyCon gripper control
+    xr_client.py                 # XRoboToolkit VR client
   visualization/
     viser_base.py         # IK + URDF visualization
-    viser_monitor.py      # Camera feeds + recording
+    viser_monitor.py      # Camera feeds + video recording
   recording/
     episode_recorder.py   # Raw episode recording (states/actions/video)
   sensors/
     cameras/
       camera.py           # Camera protocol
-      realsense_camera.py # Intel RealSense (keep)
-      opencv_camera.py    # Generic webcam (keep)
-      zed_camera.py       # Stereolabs ZED (keep)
-      camera_utils.py     # Depth/point-cloud utils (keep)
+      realsense_camera.py # Intel RealSense
+      opencv_camera.py    # Generic webcam
+      zed_camera.py       # Stereolabs ZED
+      camera_utils.py     # Image utils, obs extraction
   utils/
     launch_utils.py       # CAN setup, safe-move helpers
-    portal_utils.py       # Portal RPC for multi-process
+    portal_utils.py       # Portal RPC (@remote decorator)
     depth_utils.py        # Point cloud processing
 scripts/                  # Standalone diagnostic scripts
+docs/
+  policy_server_spec.md   # Spec for companion policy server repo
 dependencies/             # Git submodules: i2rt, XRoboToolkit
 ```
 
-### Control loop flow
+### Control loop
 
 ```
 launch.py
   └─ RobotEnv.step() @ 100 Hz
        ├─ Agent.act(obs) → action
-       │    (teleop: reads device pose/joints → IK → joint targets)
-       │    (policy: sends obs to VLA server → returns joint targets)
-       └─ Robot.command(action)
-            └─ YamMotorChainRobot → CAN bus → DM motors
+       │    teleop:  device → IK → joint targets
+       │    policy:  obs → PolicyClient.infer() → action chunk → joint targets
+       ├─ Robot.command(action) → CAN bus → DM motors
+       ├─ ViserMonitor.update(obs)      # optional: camera feeds + URDF
+       └─ EpisodeRecorder.record(obs, action)  # optional: raw data capture
 ```
 
----
+### Observation format
 
-## What to Keep
+`Observation.to_dict()` produces:
+```python
+{
+  "timestamp": float,
+  "left": {"joint_pos": (6,), "joint_vel": (6,), "gripper_pos": (1,), "ee_pose": (7,)},
+  "right": {"joint_pos": (6,), "joint_vel": (6,), "gripper_pos": (1,), "ee_pose": (7,)},
+  "left_wrist_camera": {"images": {"rgb": (H,W,3)}, "timestamp": float},
+  "right_wrist_camera": {"images": {"rgb": (H,W,3)}, "timestamp": float},
+}
+```
 
-| Component | Files | Reason |
-|-----------|-------|--------|
-| YAM robot driver | `robots/yam_motor_chain_robot.py` | Core hardware |
-| IK solvers | `robots/inverse_kinematics/yam_pink.py`, `yam_pyroki.py` | Required for Cartesian teleop |
-| Viser teleop | `agents/teleoperation/yam_viser_agent.py` | Web UI teleop |
-| GELLO teleop | `agents/teleoperation/yam_gello_agent.py` | Dynamixel leader |
-| VR teleop | `agents/teleoperation/yam_vr_agent.py` | Pico headset |
-| Policy agent | `agents/policy_learning/policy_agent.py`, `policy_client.py`, `transforms.py` | VLA policy deployment |
-| Episode recording | `recording/episode_recorder.py` | Raw data capture (states/actions/video) |
-| Viser monitor | `visualization/viser_monitor.py` | Camera + URDF display |
-| Camera drivers | `sensors/cameras/*.py` | Observation space |
-| Point cloud utils | `utils/depth_utils.py`, `sensors/cameras/camera_utils.py` | Depth obs |
-| Portal RPC | `utils/portal_utils.py` | Multi-process coordination |
-| Config system | `envs/configs/loader.py`, `instantiate.py` | Launch infra |
-| JoyCon gripper | `devices/joycon_gripper_reader.py` | Gripper control during GELLO teleop |
-| Scripts | `scripts/test_*.py` | Hardware diagnostics |
+### Action format
 
-## What to Remove (Refactor Targets)
-
-| Component | Files | Reason |
-|-----------|-------|--------|
-| Franka driver | `robots/franka_osc.py`, `robots/robotiq_gripper.py` | Not YAM |
-| Franka agents | `agents/teleoperation/franka_*.py`, `agents/client/franka_*.py` | Not YAM |
-| Franka serving | `serving/serve_pyroki_*.py` | Franka-only |
-| Franka IK | `robots/inverse_kinematics/franka_pyroki.py` | Not YAM |
-| Franka configs | `configs/franka/`, `robot_configs/franka/` | Not YAM |
-| MuJoCo sim | `robots/mujoco_sim_robot.py`, `mujoco/` | Sim only |
-| MJLab sim | `robots/mjlab_sim_robot.py`, `robots/yam_pick_red_cube_sim_robot.py` | Sim only |
-| Sim agents | `agents/teleoperation/gello_leader_agent.py`, `bilateral_leader_agent.py` | Sim-only patterns |
-| Sim configs | `configs/yam_gello_mujoco_sim.yaml`, `yam_gello_mjlab_sim.yaml`, `yam_gello_pick_red_cube_sim.yaml`, `yam_bilateral_mjlab_sim.yaml` | Sim only |
+```python
+{"left": {"pos": (7,)}, "right": {"pos": (7,)}}  # 6 joints + 1 gripper
+# If use_joint_state_as_action: also includes "vel": (7,) per arm
+```
 
 ---
 
@@ -117,48 +107,123 @@ launch.py
 ### Teleoperation
 
 ```bash
-# Viser web-UI (browser at localhost:8080)
 uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml
-
-# GELLO leader arms (USB Dynamixel)
 uv run limb/envs/launch.py --config_path configs/yam_gello_bimanual.yaml
-
-# VR headset (Pico, requires XRoboToolkit service running)
 uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml
 ```
 
 ### VLA Policy Deployment
 
 ```bash
-# π0 policy via OpenPI (requires OpenPI server at host:port)
+# OpenPI (pi0/pi0-FAST) — requires OpenPI server at host:port
 uv run limb/envs/launch.py --config_path configs/yam_pi0_bimanual.yaml
 
-# Generic policy server (requires server implementing docs/policy_server_spec.md)
+# Generic policy server — requires server implementing docs/policy_server_spec.md
 uv run limb/envs/launch.py --config_path configs/yam_policy_bimanual.yaml
-```
-
-### GELLO Network Mode (R1 Lite remote)
-
-```bash
-# Start GELLO position server on R1 Lite (at 10.42.0.1)
-bash scripts/start_gello_server.sh
-
-# Kill remote server
-bash scripts/start_gello_server.sh --kill
 ```
 
 ### Hardware Diagnostics
 
 ```bash
-# Test cameras
 uv run scripts/test_realsense_cameras.py
-
-# Test GELLO input
 uv run scripts/test_gello_input.py
-
-# Test VR input
 uv run scripts/test_vr_input.py
 ```
+
+### GELLO Network Mode (R1 Lite)
+
+```bash
+bash scripts/start_gello_server.sh        # Start on R1 Lite (10.42.0.1)
+bash scripts/start_gello_server.sh --kill  # Kill remote server
+```
+
+---
+
+## VLA Policy Integration
+
+Policies run as external servers. limb connects via `PolicyClient`:
+
+```
+┌─ Robot machine (limb) ──────────┐     ┌─ GPU machine ────────────┐
+│ RobotEnv → obs                  │     │ Policy server             │
+│ YamPolicyAgent                  │     │  (OpenPI / LeRobot / etc) │
+│   ├─ ObsTransform → flat obs   │────▶│  model.infer(obs)         │
+│   ├─ PolicyClient.infer()      │◀────│  → action chunk           │
+│   ├─ ActionChunkManager        │     └───────────────────────────┘
+│   └─ ActionTransform → action  │
+│ Robot.command(action)           │
+└─────────────────────────────────┘
+```
+
+**PolicyClient implementations:**
+- `OpenPIClient` — wraps `openpi_client` for pi0/pi0-FAST/pi0.5
+- `WebSocketPolicyClient` — generic msgpack+WebSocket (see `docs/policy_server_spec.md`)
+
+**Transforms** are YAML-configurable (no hardcoded key mappings):
+- `ObsTransform` / `OpenPIObsTransform` — key remapping, image resize, state concatenation
+- `ActionTransform` — bimanual split, gripper clip
+
+**Action chunking:** `ActionChunkManager` buffers multi-step action chunks with
+temporal smoothing (weighted linear interpolation across overlapping chunks).
+
+---
+
+## Episode Recording
+
+`EpisodeRecorder` captures raw control loop data. Configured in YAML:
+
+```yaml
+recording:
+  _target_: limb.recording.episode_recorder.EpisodeRecorder
+  base_dir: "recordings"
+  recording_fps: 30
+  auto_start: true
+  ee_frame_names: {left: "ee_link", right: "ee_link"}
+```
+
+Output per episode:
+```
+recordings/episode_20260304_153045_0001/
+  metadata.json              # config, timing, ee frame names, arm/camera lists
+  timestamps.npy             # (N,) float64 Unix timestamps at control rate
+  left_states.npz            # joint_pos (N,6), joint_vel (N,6), gripper_pos (N,1), ee_pose (N,7)
+  right_states.npz
+  left_actions.npz           # pos (N,7)
+  right_actions.npz
+  left_wrist_camera.mp4      # video
+  left_wrist_camera_timestamps.npy  # per-frame camera timestamps
+  ...
+```
+
+Post-processing to HDF5/LeRobot/other formats is done by separate scripts (not in limb).
+
+---
+
+## Config System
+
+YAML files with `_target_` for dynamic instantiation (Hydra-like, but custom):
+
+```yaml
+_target_: limb.envs.launch.LaunchConfig
+hz: 100.0
+sensors:
+  cameras:
+    left_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "409122274017"
+robots:
+  left: ["robot_configs/yam/left.yaml"]
+  right: ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+agent:
+  _target_: limb.agents.teleoperation.yam_viser_agent.YamViserAgent
+  bimanual: true
+  ik_solver: "pink"
+```
+
+Robot configs (`robot_configs/yam/left.yaml`, `right.yaml`) specify motor chain
+(CAN IDs, motor types, interface name), PID gains, joint limits, URDF path.
 
 ---
 
@@ -166,105 +231,49 @@ uv run scripts/test_vr_input.py
 
 ### CAN Interface (YAM arms)
 
-One-time udev rule to auto-bring-up CAN at 1 Mbps:
 ```bash
 echo 'SUBSYSTEM=="net", KERNEL=="can*", ACTION=="add", RUN+="/sbin/ip link set %k up type can bitrate 1000000"' \
   | sudo tee /etc/udev/rules.d/99-can.rules
 sudo udevadm control --reload && sudo udevadm trigger
 ```
 
-Check interfaces are up:
-```bash
-ip link show | grep can
-```
-
-Expected: `can_follow_l` and `can_follow_r` (or as configured in robot_configs/).
+Verify: `ip link show | grep can` — expect `can_follow_l` and `can_follow_r`.
 
 ### GELLO (Dynamixel)
 
-- USB-to-serial dongle connects to Dynamixel servos
-- Baud rate: 4 Mbps (`dynamixel_reader.py`)
-- Network mode (R1 Lite): TCP server at `10.42.0.1:port`
+USB-to-serial at 4 Mbps. Network mode: TCP at `10.42.0.1:port`.
 
 ### VR (Pico headset)
 
 ```bash
 bash scripts/install_xrobotoolkit_sdk.sh
-# Then open XRoboToolkit app on Pico headset
 ```
-
----
-
-## Config System
-
-Configs are YAML files loaded by OmegaConf. Every object uses `_target_` for dynamic instantiation:
-
-```yaml
-# configs/yam_viser_bimanual.yaml
-_target_: limb.envs.launch.LaunchConfig
-hz: 100
-cameras:
-  wrist_left:
-    _target_: limb.sensors.cameras.realsense_camera.RealSenseCamera
-    serial_number: "XXXXXX"
-robots:
-  left:
-    _target_: limb.robots.yam_motor_chain_robot.YamMotorChainRobot
-    # ...
-  right:
-    _target_: limb.robots.yam_motor_chain_robot.YamMotorChainRobot
-    # ...
-agent:
-  _target_: limb.agents.teleoperation.yam_viser_agent.YamViserAgent
-  # ...
-```
-
-Robot configs (`robot_configs/yam/left.yaml`, `right.yaml`) specify:
-- Motor chain (CAN IDs, motor types, interface name)
-- PID gains (`kp`, `kd`)
-- Joint limits (6 arms + 1 gripper)
-- URDF/XML path
 
 ---
 
 ## IK Solvers
 
-| Solver | Class | Library | Style | Use When |
-|--------|-------|---------|-------|----------|
-| Pink | `YamPink` | Pinocchio + QP | Differential (velocity) | Smooth trajectories, production |
-| PyRoki | `YamPyroki` | JAX | Global (one-shot) | Fast startup, less smooth |
+| Solver | Library | Style | Use When |
+|--------|---------|-------|----------|
+| `YamPink` | Pinocchio + QP | Differential (velocity) | Production, smooth |
+| `YamPyroki` | JAX | Global (one-shot) | Fast startup |
 
-Both expose the same interface and support bimanual simultaneous solving.
-
----
-
-## VLA Policy Integration
-
-Policies run as external servers and are called via async clients:
-
-- **π0** (`async_pi0_agent.py`): HTTP client to OpenPI server
-  - Sends: `{images: {...}, state: joint_positions}`
-  - Receives: `action_chunk` (sequence of joint targets)
-
-- **Diffusion** (`diffusion_policy_agent.py`): WebSocket client
-  - Sends observation dict
-  - Receives action chunk
-
-Both agents support action chunking and async inference to hide server latency.
+Both support bimanual and expose `self.joints` dict.
 
 ---
 
 ## Development Conventions
 
 - **Package manager**: `uv` (not pip)
-- **Python**: 3.11 exactly
-- **Linter**: `ruff` (line length 119, config in `pyproject.toml`)
+- **Python**: 3.11
+- **Linter**: `ruff` (line length 119)
 - **Logging**: `loguru` (`from loguru import logger`)
 - **Rate control**: `Rate` class from `robots/utils.py`
 - **Multi-process RPC**: `portal` library with `@remote()` decorator
 - **Config**: OmegaConf + custom `instantiate()` (not Hydra)
+- **Lazy imports**: Optional deps (openpi_client, websockets) imported inside methods
 
-### Run linter
+### Lint
 
 ```bash
 uv run ruff check limb/
@@ -286,16 +295,9 @@ omegaconf        # Config loading
 pyrealsense2     # Intel RealSense
 xdof_sdk         # XRoboToolkit VR
 dynamixel-sdk    # GELLO input device
+websockets       # Policy server client
+msgpack          # Wire serialization
 loguru           # Logging
 ```
 
-Install:
-```bash
-uv sync
-```
-
----
-
-## Refactor Status
-
-See [.claude/refactor-plan.md](.claude/refactor-plan.md) for the detailed plan to strip Franka and sim code.
+Install: `uv sync`
