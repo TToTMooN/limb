@@ -900,6 +900,84 @@ wheels = [
 ]
 
 [[package]]
+name = "limb"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "dm-env" },
+    { name = "dotdict" },
+    { name = "dynamixel-sdk" },
+    { name = "evdev" },
+    { name = "fastapi" },
+    { name = "i2rt" },
+    { name = "jaxls" },
+    { name = "loguru" },
+    { name = "matplotlib" },
+    { name = "msgpack" },
+    { name = "msgpack-numpy" },
+    { name = "numpy" },
+    { name = "omegaconf" },
+    { name = "opencv-contrib-python" },
+    { name = "pin-pink" },
+    { name = "portal" },
+    { name = "pyrealsense2" },
+    { name = "pyroki" },
+    { name = "qpsolvers", extra = ["quadprog"] },
+    { name = "robot-descriptions" },
+    { name = "ruff" },
+    { name = "tyro" },
+    { name = "uvicorn" },
+    { name = "viser" },
+    { name = "xdof-sdk" },
+    { name = "yourdfpy" },
+]
+
+[package.optional-dependencies]
+sensors = [
+    { name = "pyzed" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dm-env", specifier = "==1.6" },
+    { name = "dotdict", specifier = "==0.1" },
+    { name = "dynamixel-sdk" },
+    { name = "evdev" },
+    { name = "fastapi" },
+    { name = "i2rt", editable = "dependencies/i2rt" },
+    { name = "jaxls", git = "https://github.com/brentyi/jaxls.git" },
+    { name = "loguru" },
+    { name = "matplotlib" },
+    { name = "msgpack" },
+    { name = "msgpack-numpy" },
+    { name = "numpy" },
+    { name = "omegaconf" },
+    { name = "opencv-contrib-python" },
+    { name = "pin-pink" },
+    { name = "portal" },
+    { name = "pyrealsense2" },
+    { name = "pyroki", git = "https://github.com/chungmin99/pyroki.git" },
+    { name = "pyzed", marker = "extra == 'sensors'", path = "dependencies/pyzed-5.1-cp311-cp311-linux_x86_64.whl" },
+    { name = "qpsolvers", extras = ["quadprog"] },
+    { name = "robot-descriptions" },
+    { name = "ruff" },
+    { name = "tyro" },
+    { name = "uvicorn" },
+    { name = "viser", specifier = "==1.0.16" },
+    { name = "xdof-sdk" },
+    { name = "yourdfpy" },
+]
+provides-extras = ["sensors"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ruff", specifier = ">=0.12.3" }]
+
+[[package]]
 name = "loguru"
 version = "0.7.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1718,84 +1796,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/2e/8f/2940bfb077ea4f8dd
 wheels = [
     { url = "https://files.pythonhosted.org/packages/de/a8/0cb28d14fae93fa46fc30fc18a0022d3c200fc5e142aceb01f27cd81c47d/robot_descriptions-1.21.0-py3-none-any.whl", hash = "sha256:b2a5e1b81924e09843d2eb1b7f7fe058544de3de6236678658fdf65096dd183e", size = 101959, upload-time = "2025-09-03T07:49:56.383Z" },
 ]
-
-[[package]]
-name = "robots-realtime"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "dm-env" },
-    { name = "dotdict" },
-    { name = "dynamixel-sdk" },
-    { name = "evdev" },
-    { name = "fastapi" },
-    { name = "i2rt" },
-    { name = "jaxls" },
-    { name = "loguru" },
-    { name = "matplotlib" },
-    { name = "msgpack" },
-    { name = "msgpack-numpy" },
-    { name = "numpy" },
-    { name = "omegaconf" },
-    { name = "opencv-contrib-python" },
-    { name = "pin-pink" },
-    { name = "portal" },
-    { name = "pyrealsense2" },
-    { name = "pyroki" },
-    { name = "qpsolvers", extra = ["quadprog"] },
-    { name = "robot-descriptions" },
-    { name = "ruff" },
-    { name = "tyro" },
-    { name = "uvicorn" },
-    { name = "viser" },
-    { name = "xdof-sdk" },
-    { name = "yourdfpy" },
-]
-
-[package.optional-dependencies]
-sensors = [
-    { name = "pyzed" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "dm-env", specifier = "==1.6" },
-    { name = "dotdict", specifier = "==0.1" },
-    { name = "dynamixel-sdk" },
-    { name = "evdev" },
-    { name = "fastapi" },
-    { name = "i2rt", editable = "dependencies/i2rt" },
-    { name = "jaxls", git = "https://github.com/brentyi/jaxls.git" },
-    { name = "loguru" },
-    { name = "matplotlib" },
-    { name = "msgpack" },
-    { name = "msgpack-numpy" },
-    { name = "numpy" },
-    { name = "omegaconf" },
-    { name = "opencv-contrib-python" },
-    { name = "pin-pink" },
-    { name = "portal" },
-    { name = "pyrealsense2" },
-    { name = "pyroki", git = "https://github.com/chungmin99/pyroki.git" },
-    { name = "pyzed", marker = "extra == 'sensors'", path = "dependencies/pyzed-5.1-cp311-cp311-linux_x86_64.whl" },
-    { name = "qpsolvers", extras = ["quadprog"] },
-    { name = "robot-descriptions" },
-    { name = "ruff" },
-    { name = "tyro" },
-    { name = "uvicorn" },
-    { name = "viser", specifier = "==1.0.16" },
-    { name = "xdof-sdk" },
-    { name = "yourdfpy" },
-]
-provides-extras = ["sensors"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "ruff", specifier = ">=0.12.3" }]
 
 [[package]]
 name = "rpds-py"
