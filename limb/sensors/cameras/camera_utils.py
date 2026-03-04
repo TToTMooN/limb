@@ -1,0 +1,274 @@
+"""
+Camera utility functions for processing observation data.
+"""
+
+import os
+from typing import Any, Dict, TypeVar, Union
+
+import cv2
+import numpy as np
+from dotdict import dotdict
+from PIL import Image
+
+T = TypeVar("T")
+
+
+def nest_dotdict(d: Union[Dict[str, Any], T]) -> Union[dotdict, T]:
+    """Convert nested dictionary to dotdict."""
+    if isinstance(d, dict):
+        d_dotdict = dotdict(d)
+        for k, v in d_dotdict.items():
+            if isinstance(v, dict):
+                d_dotdict[k] = nest_dotdict(v)
+        return d_dotdict
+    return d
+
+
+def plot_camera_read(camera: Any, save_datastream: bool = False, vis: bool = True) -> None:
+    camera_data = camera.read()
+    if vis:
+        for k in camera_data.images.keys():
+            cv2.namedWindow(k)
+
+    counter = 0
+    if not os.path.exists("images"):
+        os.makedirs("images")
+    if save_datastream and not os.path.exists("stream"):
+        os.makedirs("stream")
+
+    while True:
+        data = camera.read()
+        ts = data.timestamp
+        camera_data = data.images
+
+        key = cv2.waitKey(1)
+        if vis:
+            for k in camera_data.keys():
+                cv2.imshow(k, camera_data[k][..., ::-1])
+                # plot ts on the image
+                cv2.putText(
+                    camera_data[k], f"ts: {ts}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA
+                )
+        if key == ord("s"):
+            for k in camera_data.keys():
+                cv2.imwrite(f"stream/{k}_{counter}.png", camera_data[k])
+        if save_datastream:
+            for k in camera_data.keys():
+                cv2.imwrite(f"stream/{k}_{counter}.png", camera_data[k])
+        counter += 1
+        if key == 27:
+            break
+
+
+def obs_get_rgb(obs: Any) -> Dict[str, np.ndarray]:
+    """Extract RGB images from an observation (typed ``Observation`` or legacy dict).
+
+    Args:
+        obs: ``Observation`` dataclass **or** a nested observation dictionary.
+
+    Returns:
+        Dictionary mapping camera names to RGB image arrays.
+    """
+    # Typed Observation path
+    from limb.core.observation import Observation
+
+    if isinstance(obs, Observation):
+        return {name: cam.rgb for name, cam in obs.cameras.items()}
+
+    # Legacy dict path — recursive search
+    rgb_dict: Dict[str, np.ndarray] = {}
+    for key, value in obs.items():
+        if isinstance(value, dict):
+            if "images" in value and isinstance(value["images"], dict):
+                if "rgb" in value["images"]:
+                    rgb_dict[key] = value["images"]["rgb"]
+                elif "left_rgb" in value["images"]:
+                    rgb_dict[key] = value["images"]["left_rgb"]
+                elif "right_rgb" in value["images"]:
+                    rgb_dict[key] = value["images"]["right_rgb"]
+            else:
+                nested_rgb = obs_get_rgb(value)
+                rgb_dict.update(nested_rgb)
+    return rgb_dict
+
+
+def obs_get_camera_data(obs: Any) -> Dict[str, Dict[str, Any]]:
+    """Extract all camera data from an observation (typed ``Observation`` or legacy dict).
+
+    Args:
+        obs: ``Observation`` dataclass **or** a nested observation dictionary.
+
+    Returns:
+        Dictionary mapping camera names to their full camera data.
+    """
+    from limb.core.observation import Observation
+
+    if isinstance(obs, Observation):
+        result: Dict[str, Dict[str, Any]] = {}
+        for name, cam in obs.cameras.items():
+            images: Dict[str, np.ndarray] = {"rgb": cam.rgb}
+            if cam.depth is not None:
+                images["depth"] = cam.depth
+            if cam.left_rgb is not None:
+                images["left_rgb"] = cam.left_rgb
+            if cam.right_rgb is not None:
+                images["right_rgb"] = cam.right_rgb
+            entry: Dict[str, Any] = {"images": images, "timestamp": cam.timestamp}
+            if cam.intrinsics is not None:
+                entry["intrinsics"] = cam.intrinsics
+            result[name] = entry
+        return result
+
+    # Legacy dict path — recursive search
+    camera_dict: Dict[str, Dict[str, Any]] = {}
+    for key, value in obs.items():
+        if isinstance(value, dict):
+            if "images" in value and "timestamp" in value:
+                camera_dict[key] = value
+            else:
+                nested_cameras = obs_get_camera_data(value)
+                camera_dict.update(nested_cameras)
+    return camera_dict
+
+
+def obs_has_cameras(obs: Any) -> bool:
+    """Check if observation contains any camera data.
+
+    Args:
+        obs: ``Observation`` dataclass **or** observation dictionary.
+
+    Returns:
+        True if cameras are found, False otherwise.
+    """
+    from limb.core.observation import Observation
+
+    if isinstance(obs, Observation):
+        return len(obs.cameras) > 0
+    return len(obs_get_camera_data(obs)) > 0
+
+
+def resize_with_pad(
+    images: np.ndarray,
+    height: int,
+    width: int,
+    interpolation: int = cv2.INTER_LINEAR,
+) -> np.ndarray:
+    """Resizes an image to a target height and width without distortion by padding with black.
+
+    Args:
+        images: Input image(s) with shape (h, w, c) or (b, h, w, c)
+        height: Target height
+        width: Target width
+        interpolation: OpenCV interpolation method (default: cv2.INTER_LINEAR)
+
+    Returns:
+        Resized and padded image(s) with shape (height, width, c) or (b, height, width, c)
+    """
+    has_batch_dim = images.ndim == 4
+    if not has_batch_dim:
+        images = images[None]  # Add batch dimension
+
+    batch_size, cur_height, cur_width, channels = images.shape
+
+    # Calculate scaling ratio to maintain aspect ratio
+    ratio = max(cur_width / width, cur_height / height)
+    resized_height = int(cur_height / ratio)
+    resized_width = int(cur_width / ratio)
+
+    # Process each image in the batch
+    resized_images = np.zeros((batch_size, resized_height, resized_width, channels), dtype=images.dtype)
+
+    for i in range(batch_size):
+        resized_images[i] = cv2.resize(images[i], (resized_width, resized_height), interpolation=interpolation)
+
+    # Calculate padding amounts
+    pad_h0, remainder_h = divmod(height - resized_height, 2)
+    pad_h1 = pad_h0 + remainder_h
+    pad_w0, remainder_w = divmod(width - resized_width, 2)
+    pad_w1 = pad_w0 + remainder_w
+
+    # Determine padding value based on dtype
+    if images.dtype == np.uint8:
+        pad_value = 0
+    elif images.dtype == np.float32:
+        pad_value = -1.0
+    else:
+        pad_value = 0
+
+    # Apply padding
+    padded_images = np.pad(
+        resized_images,
+        ((0, 0), (pad_h0, pad_h1), (pad_w0, pad_w1), (0, 0)),
+        mode="constant",
+        constant_values=pad_value,
+    )
+
+    # Remove batch dimension if it wasn't in the input
+    if not has_batch_dim:
+        padded_images = padded_images[0]
+
+    return padded_images
+
+
+def resize_with_center_crop(images: np.ndarray, height: int, width: int, method=Image.BILINEAR) -> np.ndarray:
+    """Replicates tf.image.resize_with_center_crop for multiple images using PIL. Resizes a batch of images to a target height
+    and width without distortion by center cropping.
+
+    Args:
+        images: A batch of images in [..., height, width, channel] format.
+        height: The target height of the image.
+        width: The target width of the image.
+        method: The interpolation method to use. Default is bilinear.
+
+    Returns:
+        The resized and center-cropped images in [..., height, width, channel].
+    """
+    # If the images are already the correct size, return them as is.
+    if images.shape[-3:-1] == (height, width):
+        return images
+
+    original_shape = images.shape
+
+    images = images.reshape(-1, *original_shape[-3:])
+    resized = np.stack(
+        [np.array(_resize_with_center_crop(Image.fromarray(im), height, width, method=method)) for im in images]
+    )
+    return resized.reshape(*original_shape[:-3], *resized.shape[-3:])
+
+
+def _resize_with_center_crop(image: Image.Image, height: int, width: int, method: int) -> Image.Image:
+    """Replicates tf.image.resize_with_center_crop for one image using PIL. Resizes an image to a target height and
+    width without distortion by cropping the center of the image.
+    """
+    cur_width, cur_height = image.size
+    if cur_width == width and cur_height == height:
+        return image  # No need to resize if the image is already the correct size.
+
+    # Calculate scaling ratio to ensure both dimensions are at least as large as target
+    # (we'll crop the excess, so we want to scale up to cover the target dimensions)
+    ratio = max(height / cur_height, width / cur_width)
+    resized_width = int(cur_width * ratio)
+    resized_height = int(cur_height * ratio)
+
+    # Resize image so that the smaller dimension fits the target
+    resized_image = image.resize((resized_width, resized_height), resample=method)
+
+    # Calculate crop offsets to center the crop
+    crop_w0 = (resized_width - width) // 2
+    crop_h0 = (resized_height - height) // 2
+
+    # Ensure we don't go out of bounds
+    crop_w0 = max(0, crop_w0)
+    crop_h0 = max(0, crop_h0)
+    crop_w1 = min(resized_width, crop_w0 + width)
+    crop_h1 = min(resized_height, crop_h0 + height)
+
+    # Extract the center crop using PIL's crop method (left, upper, right, lower)
+    cropped_image = resized_image.crop((crop_w0, crop_h0, crop_w1, crop_h1))
+
+    # Handle edge case where crop might be smaller than target (shouldn't happen with correct ratio calculation)
+    if cropped_image.size != (width, height):
+        cropped_image = cropped_image.resize((width, height), resample=method)
+
+    assert cropped_image.size == (width, height)
+    return cropped_image

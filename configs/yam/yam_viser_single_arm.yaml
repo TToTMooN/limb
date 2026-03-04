@@ -1,0 +1,20 @@
+_target_: limb.envs.launch.LaunchConfig
+
+# sensors:
+#   cameras:
+#     top_camera:
+#         _target_: limb.sensors.cameras.camera.CameraNode
+#         camera:
+#             _target_: limb.sensors.cameras.opencv_camera.OpencvCamera
+#             device_path: "/dev/video4"
+#             camera_type: "realsense_camera"
+
+robots:
+  left: ["robot_configs/yam/left.yaml"]
+
+agent:
+  _target_: limb.agents.teleoperation.yam_viser_agent.YamViserAgent
+  bimanual: false
+
+station_metadata:
+  world_frame: "left_arm" # front x, left y, up z

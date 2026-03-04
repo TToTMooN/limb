@@ -1,0 +1,15 @@
+*.egg-info/
+*.egg/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+*.png
+__pycache__/
+.venv/
+.ruff_cache/
+recordings/

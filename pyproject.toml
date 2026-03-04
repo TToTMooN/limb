@@ -1,0 +1,141 @@
+[build-system]
+requires = ["flit_core >= 3.4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "limb"
+version = "0.1.0"
+description = "A collection of realtime & high-frequency control interfaces for robot arms"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "viser==1.0.16",
+    "tyro",
+    "omegaconf",
+    "portal",
+    "dm-env==1.6",
+
+    "dotdict==0.1",
+    "numpy",
+    "opencv-contrib-python",
+    "pyrealsense2",
+    "robot_descriptions",
+    "yourdfpy",
+    "ruff",
+    "pyroki @ git+https://github.com/chungmin99/pyroki.git",
+    "jaxls @ git+https://github.com/brentyi/jaxls.git",
+    "pin-pink",
+    "qpsolvers[quadprog]",
+    "matplotlib",
+    "msgpack",
+    "msgpack_numpy",
+
+    "i2rt",
+    "uvicorn",
+    "fastapi",
+    "loguru",
+
+    "xdof_sdk",
+    "dynamixel-sdk",
+    "evdev",
+]
+
+[project.optional-dependencies]
+sensors = [
+    "pyzed",
+]
+[tool.uv.sources]
+pyzed = { path = "dependencies/pyzed-5.1-cp311-cp311-linux_x86_64.whl" }
+i2rt = { path = "dependencies/i2rt", editable = true }
+
+[tool.uv]
+override-dependencies = [
+    "numpy==1.26.4",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["limb*"]
+exclude = ["configs*"]
+
+[project.urls]
+Repository = "https://github.com/TToTMooN/limb"
+
+[tool.flit.module]
+name = "limb"
+
+[tool.ruff]
+line-length = 119 # Set the max line length to 119 characters.
+# keep in alphabetical order
+lint.select = [
+    "ANN",  # annotations
+    "B",  # bugbear rules
+    "E",  # pycodestyle errors.
+    "F",  # Pyflakes rules.
+    "PLC",  # Pylint convention warnings.
+    "PLE",  # Pylint errors.
+    "PLR",  # Pylint refactor recommendations.
+    "PLW",  # Pylint warnings.
+    "I",  # Import sorting.
+    "RUF"  # Ruff rules.
+]
+# keep in alphabetical/numerical order
+lint.ignore = [
+    "ANN002",
+    "ANN003",
+    "ANN401",  # Dynamically typed expressions (typing.Any) are disallowed
+    "E402",
+    "E501",
+    "E741", # Ambiguous variable name. (l, O, or I)
+    "F405",
+    "F841",
+    "PLC0414",  # Import alias does not rename variable. (this is used for exporting names)
+    "PLC1901",  # Use falsey strings.
+    "PLR0911",  # Too many return statements.
+    "PLR0912",  # Too many branches.
+    "PLR0913",  # Too many arguments.
+    "PLR0915",  # Too many statements.
+    "PLR1722",
+    "PLR2004",  # Magic value used in comparison.
+    "PLW0603",  # Global statement updates are discouraged.
+    "PLW2901",  # For loop variable overwritten.
+    "RUF001",
+    "RUF009"
+]
+lint.extend-select = ["E501"]
+exclude = ["*.ipynb", "dependencies/*"]
+
+[tool.ruff.format]
+docstring-code-format = true
+skip-magic-trailing-comma = false
+
+[tool.pyright]
+pythonVersion = "3.11"
+ignore = ["dependencies/**", "limb/scripts/**"]
+
+reportMissingImports = "none"
+reportAttributeAccessIssue = "none"
+
+[tool.coverage.report]
+exclude_also = [
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+    "def __repr__",
+]
+omit = [
+    "*exceptions.py",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.3",
+]
+
+[tool.ruff.lint.flake8-annotations]
+ignore-fully-untyped = true
+suppress-none-returning = true
+suppress-dummy-args = true
+mypy-init-return = true
+allow-star-arg-any = true

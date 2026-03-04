@@ -1,0 +1,48 @@
+_target_: limb.envs.launch.LaunchConfig
+hz: 100.0
+
+sensors:
+  cameras:
+    left_wrist_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "409122274017"
+    right_wrist_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "409122274543"
+    # head_camera:
+    #     _target_: limb.sensors.cameras.camera.CameraNode
+    #     camera:
+    #         _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+    #         serial_number: "215122256240"
+
+robots:
+  left: ["robot_configs/yam/left.yaml"]
+  right: ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+
+agent:
+  _target_: limb.agents.teleoperation.yam_vr_agent.YamVrAgent
+  bimanual: true
+  ik_solver: "pink"  # "pyroki" or "pink" (default)
+  ik_params:  # Pink IK tuning (ignored for pyroki)
+    position_cost: 50.0       # end-effector position tracking weight
+    orientation_cost: 10.0    # end-effector orientation tracking weight
+    posture_cost: 0.001       # regularization toward rest pose
+    lm_damping: 1.0           # Levenberg-Marquardt damping (higher = smoother)
+  right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]
+  scale_factor: 1.5
+  rotation_scale_factor: 1.5    # orientation amplification (1.0 = 1:1 with VR controller)
+  initial_ee_position: [0.25, 0.0, 0.1]              # [x_fwd, y_left, z_up] in arm base frame
+  initial_ee_rpy: [3.14159, 0.0, 1.5708]              # pointing front (original default)
+
+station_metadata:
+  world_frame: "left_arm" # front x, left y, up z
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]
