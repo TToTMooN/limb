@@ -5,6 +5,7 @@ Supports headless mode (viser_server=None) for running IK without visualization,
 and visualized mode for interactive control via Viser gizmos.
 """
 
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -14,9 +15,7 @@ import numpy as np
 import viser
 import viser.extras
 import viser.transforms as vtf
-
 import yourdfpy
-import os
 
 try:
     from robot_descriptions.loaders.yourdfpy import load_robot_description as load_urdf_robot_description
@@ -75,9 +74,11 @@ class ViserAbstractBase(ABC):
         self.coordinate_frame = coordinate_frame
 
         if robot_description == "yam_description":
-            current_path = os.path.dirname(os.path.abspath(__file__))
-            urdf_path = os.path.join(current_path, "..", "..", "..", "dependencies", "i2rt", "i2rt", "robot_models", "yam", "yam.urdf")
-            mesh_dir = os.path.join(current_path, "..", "..", "..", "dependencies", "i2rt", "i2rt", "robot_models", "yam", "assets")
+            from limb import ROOT_PATH
+
+            yam_models = os.path.join(ROOT_PATH, "dependencies", "i2rt", "i2rt", "robot_models", "yam")
+            urdf_path = os.path.join(yam_models, "yam.urdf")
+            mesh_dir = os.path.join(yam_models, "assets")
             self.urdf = yourdfpy.URDF.load(urdf_path, mesh_dir=mesh_dir)
         else:
             self.urdf = set_min_distance_from_limits(

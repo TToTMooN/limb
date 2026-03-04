@@ -30,8 +30,8 @@ from loguru import logger
 
 from limb.agents.agent import Agent
 from limb.agents.teleoperation.yam_viser_agent import _create_ik_solver
+from limb.devices.xr_client import XrClient
 from limb.utils.portal_utils import remote
-from limb.utils.xr_client import XrClient
 
 # Default VR-to-robot frame rotation.
 R_VR_TO_ROBOT_DEFAULT = np.array([

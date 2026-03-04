@@ -37,8 +37,8 @@ import numpy as np
 from dm_env.specs import Array
 
 from limb.agents.agent import Agent
-from limb.dynamixel.dynamixel_reader import DynamixelReader
-from limb.dynamixel.network_dynamixel_reader import NetworkDynamixelReader
+from limb.devices.dynamixel_reader import DynamixelReader
+from limb.devices.network_dynamixel_reader import NetworkDynamixelReader
 from limb.utils.portal_utils import remote
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,7 @@ class YamGelloAgent(Agent):
 
         self._gripper_reader: Optional["JoyConGripperReader"] = None
         if joycon_gripper:
-            from limb.input_devices.joycon_gripper_reader import JoyConGripperReader
+            from limb.devices.joycon_gripper_reader import JoyConGripperReader
 
             self._gripper_reader = JoyConGripperReader()
             logger.info("Joy-Con gripper control enabled")

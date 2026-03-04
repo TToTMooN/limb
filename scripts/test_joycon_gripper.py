@@ -38,7 +38,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
 
-    from limb.input_devices.joycon_gripper_reader import JoyConGripperReader
+    from limb.devices.joycon_gripper_reader import JoyConGripperReader
 
     reader = JoyConGripperReader(
         gripper_open=args.open,

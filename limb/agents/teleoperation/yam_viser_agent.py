@@ -10,8 +10,8 @@ from dm_env.specs import Array
 from loguru import logger
 
 from limb.agents.agent import Agent
-from limb.robots.viser.viser_monitor import ViserMonitor
 from limb.utils.portal_utils import remote
+from limb.visualization.viser_monitor import ViserMonitor
 
 
 def _create_ik_solver(solver_name: str, ik_params: Optional[Dict[str, Any]] = None, **kwargs):

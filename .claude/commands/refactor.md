@@ -24,7 +24,7 @@ Fix any broken imports found.
 
 ## Phase 4: Smoke test
 ```bash
-uv run limb/envs/launch.py --config_path configs/yam/yam_viser_bimanual.yaml
+uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml
 ```
 (Will fail if real hardware not connected, but import errors will surface here.)
 

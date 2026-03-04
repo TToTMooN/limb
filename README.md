@@ -2,21 +2,42 @@
 
 **Lightweight arm control for robot learning.**
 
-limb is a minimal, ROS-free Python stack for high-frequency control of direct-drive robot arms. It handles teleoperation (web UI, GELLO leader arms, VR), camera streaming, and learned policy deployment — everything between bare metal and your research code.
+Minimal, ROS-free Python stack for high-frequency control of direct-drive robot arms.
+Teleoperation, camera streaming, and learned policy deployment — everything between bare metal and your research code.
 
-Built for [I2RT YAM](https://github.com/i2rt-robotics/i2rt) bimanual arms. Designed to be extended to any CAN-bus arm (ARX, Agilex, etc.).
+Built for [I2RT YAM](https://github.com/i2rt-robotics/i2rt) bimanual arms.
+
+---
+
+**Contents:**
+[Install](#install) ·
+[Hardware Setup](#hardware-setup) ·
+[Teleoperation](#teleoperation) ·
+[Policy Deployment](#policy-deployment) ·
+[Diagnostics](#hardware-diagnostics) ·
+[Architecture](#architecture) ·
+[Extending](#extending-limb) ·
+[Development](#development)
+
+---
 
 ## Why limb?
 
-- **No ROS.** Direct CAN bus at 100 Hz. One Python process, one config file, one launch command.
-- **Plug-and-play teleop.** Viser web UI, GELLO Dynamixel leader arms (USB or network), Pico VR — swap with a YAML change.
-- **Policy-ready.** Ship your VLA (pi0, Diffusion Policy) as a server, point limb at it, collect data or run inference.
-- **Typed observations.** Structured `Observation` dataclasses flow through the main process; agents receive plain dicts over RPC — no magic keys to memorize.
 
-## Quick start
+|                          |                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------- |
+| **No ROS**               | Direct CAN bus at 100 Hz. One process, one config, one launch command.       |
+| **Plug-and-play teleop** | Viser web UI, GELLO leader arms, Pico VR — swap with a YAML change.          |
+| **Policy-ready**         | Ship your VLA as a server, point limb at it, run inference.                  |
+| **Typed observations**   | Structured `Observation` dataclasses in the main loop; plain dicts over RPC. |
+
+
+---
+
+## Install
 
 ```bash
-git clone --recurse-submodules <your-repo-url>
+git clone --recurse-submodules https://github.com/TToTMooN/limb
 cd limb
 
 # Install uv if you don't have it
@@ -27,7 +48,15 @@ uv venv --python 3.11
 uv sync
 ```
 
-### One-time CAN setup (YAM arms)
+> **Submodule:** The repo includes [i2rt](https://github.com/i2rt-robotics/i2rt) (motor driver) as a git submodule under `dependencies/`. Make sure you clone with `--recurse-submodules`. The XRoboToolkit SDK for VR is installed separately — see [VR setup](#vr-pico-headset).
+
+---
+
+## Hardware Setup
+
+### CAN Interface (YAM arms)
+
+One-time udev rule to auto-bring-up CAN at 1 Mbps:
 
 ```bash
 echo 'SUBSYSTEM=="net", KERNEL=="can*", ACTION=="add", RUN+="/sbin/ip link set %k up type can bitrate 1000000"' \
@@ -35,122 +64,145 @@ echo 'SUBSYSTEM=="net", KERNEL=="can*", ACTION=="add", RUN+="/sbin/ip link set %
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Verify with `ip link show | grep can` — you should see `can_follow_l` and `can_follow_r`.
+Verify: `ip link show | grep can` — expect `can_follow_l` and `can_follow_r`.
 
-### Launch
+By default CAN interfaces show up as `can0`, `can1`, etc. The robot configs expect named interfaces (`can_follow_l`, `can_follow_r`). To rename them, add a udev rule:
 
 ```bash
-# Viser web-UI teleop (open browser at localhost:8080)
-uv run limb/envs/launch.py --config_path configs/yam/yam_viser_bimanual.yaml
+# Find each adapter's device path
+udevadm info -a /sys/class/net/can0 | grep serial
 
-# GELLO leader arms (USB Dynamixel)
-uv run limb/envs/launch.py --config_path configs/yam_gello_bimanual.yaml
-
-# GELLO over network (R1 Lite Teleop at 10.42.0.1)
-uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml
-
-# Pico VR headset
-uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml
+# Then create a rule mapping serial → name, e.g.:
+echo 'SUBSYSTEM=="net", KERNEL=="can*", ATTRS{serial}=="XXXXXXXX", NAME="can_follow_l"' \
+  | sudo tee -a /etc/udev/rules.d/99-can.rules
 ```
 
-Every launch command follows the same pattern: one entrypoint, one YAML config.
+Alternatively, edit `channel` in `robot_configs/yam/left.yaml` / `right.yaml` to match your interface names directly.
 
-## Teleoperation modes
+### GELLO (Dynamixel leader arms)
+
+- **USB mode:** Plug the USB-to-serial dongle into the host. Baud: 4 Mbps. *(Not yet verified — network mode is recommended.)*
+- **Network mode (R1 Lite):** TCP server at `10.42.0.1`. See [GELLO Network](#gello-network-mode-r1-lite) below.
+
+### VR (Pico headset)
+
+1. Install the [XRoboToolkit PC Service](https://github.com/XR-Robotics/XRoboToolkit-PC-Service) on your workstation.
+2. Install the Python SDK:
+  ```bash
+   bash scripts/install_xrobotoolkit_sdk.sh
+  ```
+3. Open the **XRoboToolkit** app on the Pico headset and confirm poses stream in the PC Service.
+
+---
+
+## Teleoperation
+
+Every launch follows the same pattern — one entrypoint, one YAML config:
+
+```bash
+uv run limb/envs/launch.py --config_path <config.yaml>
+```
 
 ### Viser (web browser)
 
-The default. Opens a 3D scene with URDF visualization, camera feeds, and interactive handles for Cartesian end-effector control. IK is solved via [Pink](https://github.com/stephane-caron/pink) (Pinocchio QP) or [pyroki](https://github.com/chungmin99/pyroki) (JAX).
+3D scene with URDF visualization, camera feeds, and interactive Cartesian handles.
+IK via [Pink](https://github.com/stephane-caron/pink) (Pinocchio QP) or [pyroki](https://github.com/chungmin99/pyroki) (JAX).
 
 ```bash
-uv run limb/envs/launch.py --config_path configs/yam/yam_viser_bimanual.yaml
-```
+# Bimanual (open browser at localhost:8080)
+uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml
 
-Single-arm mode is also available:
-
-```bash
-uv run limb/envs/launch.py --config_path configs/yam/yam_viser_single_arm.yaml
+# Single arm
+uv run limb/envs/launch.py --config_path configs/yam_viser_single_arm.yaml
 ```
 
 ### GELLO (Dynamixel leader arms)
 
-Direct joint-to-joint mapping — no IK needed. The leader and follower share the same kinematics so joint angles transfer directly.
+Direct joint-to-joint mapping — leader and follower share kinematics, no IK needed.
 
-**USB (direct):**
+> **Note:** USB mode is not yet fully verified. Network mode (R1 Lite) is the recommended setup.
+
 ```bash
+# USB (direct connection)
 uv run limb/envs/launch.py --config_path configs/yam_gello_bimanual.yaml
 ```
 
-**Network (R1 Lite Teleop over Ethernet):**
+#### GELLO Network Mode (R1 Lite)
 
-Start the position server on the remote device first:
+Start the position server on the remote device, then launch locally:
+
 ```bash
-bash scripts/start_gello_server.sh              # default host 10.42.0.1
+# On R1 Lite
+bash scripts/start_gello_server.sh              # default 10.42.0.1
 bash scripts/start_gello_server.sh 10.42.0.2    # custom host
-bash scripts/start_gello_server.sh --kill        # stop remote server
-```
+bash scripts/start_gello_server.sh --kill        # stop server
 
-Then launch:
-```bash
+# On workstation
 uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml
 ```
 
 ### VR (Pico headset)
 
-Cartesian control via Pico VR controllers through [XRoboToolkit](https://github.com/XR-Robotics/XRoboToolkit-PC-Service).
+Cartesian control via Pico VR controllers through [XRoboToolkit](https://github.com/XR-Robotics/XRoboToolkit-PC-Service). Requires the [VR setup](#vr-pico-headset) above.
 
-**Setup (one-time):**
-1. Install the [XRoboToolkit PC Service](https://github.com/XR-Robotics/XRoboToolkit-PC-Service) on your PC.
-2. Install the SDK: `bash scripts/install_xrobotoolkit_sdk.sh`
-3. Open the XRoboToolkit app on the Pico headset and verify poses stream in the PC Service.
-
-**Launch:**
 ```bash
 uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml
 ```
 
-**Controls:**
 
-| Button | Function |
-|---|---|
-| **Grip** (hold) | Activate arm control — arm follows hand |
+| Button             | Function                                           |
+| ------------------ | -------------------------------------------------- |
+| **Grip** (hold)    | Activate arm — arm follows hand                    |
 | **Grip** (release) | Freeze arm — re-grip to continue from new position |
-| **Trigger** | Gripper (0 = open, fully pressed = closed) |
+| **Trigger**        | Gripper (0 = open, fully pressed = closed)         |
+
 
 The Viser web UI stays active during VR teleop for monitoring.
 
-## Policy deployment
+---
 
-Learned policies run as external servers. limb calls them as async clients inside a standard agent.
+## Policy Deployment
 
-**pi0 (OpenPI):**
-```bash
-uv run limb/envs/launch.py --config_path configs/yam/yam_pi0_bimanual.yaml
-```
+Learned policies run as external servers. limb calls them as async clients inside a standard agent. Both support action chunking and async inference to hide server latency.
+
+### pi0 (OpenPI)
+
 Sends `{images, state}` over HTTP, receives action chunks.
 
-**Diffusion Policy:**
 ```bash
-uv run limb/envs/launch.py --config_path configs/yam/yam_diffusion_bimanual.yaml
+uv run limb/envs/launch.py --config_path configs/yam_pi0_bimanual.yaml
 ```
+
+### Diffusion Policy
+
 Sends observations over WebSocket, receives action chunks.
 
-Both support action chunking and async inference to hide server latency.
+```bash
+uv run limb/envs/launch.py --config_path configs/yam_diffusion_bimanual.yaml
+```
 
-## Hardware diagnostics
+---
+
+## Hardware Diagnostics
 
 ```bash
-# Test cameras (interactive picker, recording, depth)
+# Cameras (interactive picker, recording, depth)
 uv run scripts/test_realsense_cameras.py
 uv run scripts/test_realsense_cameras.py --all --depth
 
-# Test GELLO input (USB or network)
+# GELLO input (USB or network)
 uv run scripts/test_gello_input.py
 uv run scripts/test_gello_input.py --host 10.42.0.1
 
-# Test VR input
+# VR input
 uv run scripts/test_vr_input.py
 uv run scripts/test_vr_input.py --with-ik    # with IK + Viser visualization
+
+# JoyCon gripper
+uv run scripts/test_joycon_gripper.py
 ```
+
+---
 
 ## Architecture
 
@@ -164,30 +216,58 @@ launch.py
             └─ YamMotorChainRobot → CAN bus → DM motors
 ```
 
-Observations flow as typed `Observation` dataclasses in the main process and are converted to plain dicts at the portal RPC boundary (`obs.to_dict()`). This keeps agents portable while giving monitors and the control loop structured access.
+Observations flow as typed `Observation` dataclasses in the main process and are converted to plain dicts at the RPC boundary (`obs.to_dict()`).
+
+### Project Layout
 
 ```
 limb/
-  core/                    # Observation dataclasses
   envs/
     launch.py              # Main entry point
-    robot_env.py           # dm_env wrapper, builds Observation from RPC results
+    robot_env.py           # dm_env wrapper, builds Observation
     configs/               # YAML → dataclass loader + instantiate()
   agents/
     teleoperation/         # Viser, GELLO, VR agents
     policy_learning/       # pi0, Diffusion Policy agents
   robots/
     yam_motor_chain_robot.py  # CAN bus driver
-    inverse_kinematics/       # Pink (Pinocchio) and pyroki (JAX) IK
-    viser/                    # URDF viz + camera monitor
+    inverse_kinematics/       # Pink (Pinocchio) and pyroki (JAX)
+  devices/                 # GELLO (Dynamixel), JoyCon gripper, VR client
+  visualization/           # URDF viz + camera monitor (Viser)
   sensors/cameras/         # RealSense, OpenCV, ZED drivers
-  dynamixel/               # GELLO USB + network readers
-  utils/                   # Rate control, portal RPC, VR client
-configs/                   # YAML launch configs
-robot_configs/             # Per-arm hardware specs (CAN IDs, PID gains, joint limits)
+  utils/                   # Rate control, portal RPC, depth utils
+configs/                   # YAML launch configs (OmegaConf)
+robot_configs/             # Per-arm hardware specs (CAN IDs, PID, joint limits)
 scripts/                   # Diagnostics and server scripts
-dependencies/              # Git submodules (i2rt, XRoboToolkit)
+dependencies/              # i2rt submodule, XRoboToolkit SDK, ZED wheel
 ```
+
+### Config System
+
+Configs are YAML + [OmegaConf](https://github.com/omry/omegaconf). Every component uses `_target_` for dynamic instantiation:
+
+```yaml
+agent:
+  _target_: limb.agents.teleoperation.yam_viser_agent.YamViserAgent
+robots:
+  left:
+    _target_: limb.robots.yam_motor_chain_robot.YamMotorChainRobot
+cameras:
+  wrist_left:
+    _target_: limb.sensors.cameras.realsense_camera.RealSenseCamera
+    serial_number: "XXXXXX"
+```
+
+### IK Solvers
+
+
+| Solver                                         | Library        | Style                   | Notes                               |
+| ---------------------------------------------- | -------------- | ----------------------- | ----------------------------------- |
+| [Pink](https://github.com/stephane-caron/pink) | Pinocchio + QP | Differential (velocity) | Smooth trajectories, production use |
+| [pyroki](https://github.com/chungmin99/pyroki) | JAX            | Global (one-shot)       | Fast startup, less smooth           |
+
+
+---
 
 ## Extending limb
 
@@ -198,11 +278,12 @@ from limb.agents.agent import Agent
 
 class MyAgent(Agent):
     def act(self, obs):
-        # obs is a plain dict: {"left": {"joint_pos": ..., ...}, "cam_name": {"images": ...}, ...}
+        # obs is a plain dict: {"left": {"joint_pos": ...}, "cam_name": {"images": ...}, ...}
         return {"left": {"pos": target_joints}, "right": {"pos": target_joints}}
 ```
 
 Point your YAML config at it:
+
 ```yaml
 agent:
   _target_: my_package.MyAgent
@@ -211,18 +292,22 @@ agent:
 
 ### Add a new robot arm
 
-Implement the `Robot` protocol (`robots/robot.py`) with `get_observations()`, `command_joint_pos()`, etc. The CAN-bus driver pattern in `yam_motor_chain_robot.py` is a good starting point for any direct-drive arm.
+Implement the `Robot` protocol in `robots/robot.py` — see `yam_motor_chain_robot.py` for a CAN-bus reference implementation.
+
+---
 
 ## Development
 
 ```bash
-uv run ruff check limb/     # lint
+uv run ruff check limb/        # lint
 uv run ruff check --fix limb/  # auto-fix
-uv run ruff format limb/    # format
+uv run ruff format limb/       # format
 ```
 
-Python 3.11 | Package manager: `uv` | Linter: `ruff` (line length 119)
+Python 3.11 · `uv` · `ruff` (line length 119) · `loguru` for logging
+
+---
 
 ## Acknowledgments
 
-Some structure is inspired by [GELLO](https://github.com/wuphilipp/gello_software) and [robots_realtime](https://github.com/uynitsuj/robots_realtime).
+Inspired by [GELLO](https://github.com/wuphilipp/gello_software) and [robots_realtime](https://github.com/uynitsuj/robots_realtime).

@@ -21,7 +21,6 @@ from limb.envs.configs.loader import DictLoader
 from limb.envs.robot_env import RobotEnv
 from limb.robots.robot import Robot
 from limb.robots.utils import Rate, Timeout
-from limb.robots.viser.viser_monitor import ViserMonitor
 from limb.sensors.cameras.camera import CameraDriver
 from limb.utils.launch_utils import (
     cleanup_processes,
@@ -32,6 +31,7 @@ from limb.utils.launch_utils import (
     setup_can_interfaces,
     setup_logging,
 )
+from limb.visualization.viser_monitor import ViserMonitor
 
 SAFE_MOVE_DURATION_S = 1.0
 IK_WARMUP_TIMEOUT_S = 15.0

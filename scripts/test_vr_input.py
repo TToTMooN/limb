@@ -73,7 +73,7 @@ def _make_raw_table(xr, zero_count: int) -> Table:
 
 def test_raw_input() -> None:
     """Print raw VR controller data with rich Live display."""
-    from limb.utils.xr_client import XrClient
+    from limb.devices.xr_client import XrClient
 
     xr = XrClient()
 

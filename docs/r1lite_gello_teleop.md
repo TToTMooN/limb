@@ -114,8 +114,8 @@ The script auto-adds the ROS 2 Python path to `sys.path` so no `source
 
 | Component | File | Purpose |
 | --- | --- | --- |
-| `NetworkDynamixelReader` | `limb/dynamixel/network_dynamixel_reader.py` | TCP client — connects to the server, receives position frames, exposes `.get_joint_positions()` |
-| `DynamixelReader` | `limb/dynamixel/dynamixel_reader.py` | Direct USB serial reader (for older hardware with micro USB) |
+| `NetworkDynamixelReader` | `limb/devices/network_dynamixel_reader.py` | TCP client — connects to the server, receives position frames, exposes `.get_joint_positions()` |
+| `DynamixelReader` | `limb/devices/dynamixel_reader.py` | Direct USB serial reader (for older hardware with micro USB) |
 | `YamGelloAgent` | `limb/agents/teleoperation/yam_gello_agent.py` | Teleoperation agent — direct 1:1 mapping: `yam_target = clamp(leader_position, joint_limits)` |
 
 The agent auto-selects the reader based on config:
@@ -248,8 +248,8 @@ python3 gello_position_server.py --help
 | File | Location | Description |
 | --- | --- | --- |
 | `gello_position_server.py` | `scripts/` (and deployed to `~/` on device) | TCP position server for the R1 Lite Teleop |
-| `network_dynamixel_reader.py` | `limb/dynamixel/` | TCP client reader (host PC) |
-| `dynamixel_reader.py` | `limb/dynamixel/` | Direct USB serial reader (legacy) |
+| `network_dynamixel_reader.py` | `limb/devices/` | TCP client reader (host PC) |
+| `dynamixel_reader.py` | `limb/devices/` | Direct USB serial reader (legacy) |
 | `yam_gello_agent.py` | `limb/agents/teleoperation/` | GELLO teleoperation agent |
 | `test_gello_input.py` | `scripts/` | Diagnostic / test script |
 | `yam_gello_network_bimanual.yaml` | `configs/` | Config for Ethernet mode |

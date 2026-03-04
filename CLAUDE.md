@@ -34,10 +34,15 @@ limb/
     inverse_kinematics/
       yam_pink.py         # Pinocchio QP IK (keep)
       yam_pyroki.py       # JAX IK (keep)
-    viser/
-      viser_base.py       # IK + URDF visualization
-      viser_monitor.py    # Camera feeds + recording
     utils.py              # Rate limiter, Timeout
+  devices/
+    dynamixel_reader.py          # USB GELLO (keep)
+    network_dynamixel_reader.py  # Network GELLO / R1 Lite (keep)
+    joycon_gripper_reader.py     # JoyCon gripper control (keep)
+    xr_client.py                 # XRoboToolkit VR client (keep)
+  visualization/
+    viser_base.py         # IK + URDF visualization
+    viser_monitor.py      # Camera feeds + recording
   sensors/
     cameras/
       camera.py           # Camera protocol
@@ -45,13 +50,9 @@ limb/
       opencv_camera.py    # Generic webcam (keep)
       zed_camera.py       # Stereolabs ZED (keep)
       camera_utils.py     # Depth/point-cloud utils (keep)
-  dynamixel/
-    dynamixel_reader.py          # USB GELLO
-    network_dynamixel_reader.py  # Network GELLO (R1 Lite)
   utils/
     launch_utils.py       # CAN setup, safe-move helpers
     portal_utils.py       # Portal RPC for multi-process
-    xr_client.py          # XRoboToolkit VR client
     depth_utils.py        # Point cloud processing
 scripts/                  # Standalone diagnostic scripts
 dependencies/             # Git submodules: i2rt, XRoboToolkit
@@ -81,12 +82,12 @@ launch.py
 | GELLO teleop | `agents/teleoperation/yam_gello_agent.py` | Dynamixel leader |
 | VR teleop | `agents/teleoperation/yam_vr_agent.py` | Pico headset |
 | VLA policies | `agents/policy_learning/async_pi0_agent.py`, `diffusion_policy_agent.py` | Policy deployment |
-| Viser monitor | `robots/viser/viser_monitor.py` | Camera + URDF display |
+| Viser monitor | `visualization/viser_monitor.py` | Camera + URDF display |
 | Camera drivers | `sensors/cameras/*.py` | Observation space |
 | Point cloud utils | `utils/depth_utils.py`, `sensors/cameras/camera_utils.py` | Depth obs |
 | Portal RPC | `utils/portal_utils.py` | Multi-process coordination |
 | Config system | `envs/configs/loader.py`, `instantiate.py` | Launch infra |
-| JoyCon gripper | `input_devices/joycon_gripper_reader.py` | Gripper control during GELLO teleop |
+| JoyCon gripper | `devices/joycon_gripper_reader.py` | Gripper control during GELLO teleop |
 | Scripts | `scripts/test_*.py` | Hardware diagnostics |
 
 ## What to Remove (Refactor Targets)
@@ -101,7 +102,7 @@ launch.py
 | MuJoCo sim | `robots/mujoco_sim_robot.py`, `mujoco/` | Sim only |
 | MJLab sim | `robots/mjlab_sim_robot.py`, `robots/yam_pick_red_cube_sim_robot.py` | Sim only |
 | Sim agents | `agents/teleoperation/gello_leader_agent.py`, `bilateral_leader_agent.py` | Sim-only patterns |
-| Sim configs | `configs/yam/yam_gello_mujoco_sim.yaml`, `yam_gello_mjlab_sim.yaml`, `yam_gello_pick_red_cube_sim.yaml`, `yam_bilateral_mjlab_sim.yaml` | Sim only |
+| Sim configs | `configs/yam_gello_mujoco_sim.yaml`, `yam_gello_mjlab_sim.yaml`, `yam_gello_pick_red_cube_sim.yaml`, `yam_bilateral_mjlab_sim.yaml` | Sim only |
 
 ---
 
@@ -111,23 +112,23 @@ launch.py
 
 ```bash
 # Viser web-UI (browser at localhost:8080)
-uv run limb/envs/launch.py --config_path configs/yam/yam_viser_bimanual.yaml
+uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml
 
 # GELLO leader arms (USB Dynamixel)
-uv run limb/envs/launch.py --config_path configs/yam/yam_gello_bimanual.yaml
+uv run limb/envs/launch.py --config_path configs/yam_gello_bimanual.yaml
 
 # VR headset (Pico, requires XRoboToolkit service running)
-uv run limb/envs/launch.py --config_path configs/yam/yam_vr_bimanual.yaml
+uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml
 ```
 
 ### VLA Policy Deployment
 
 ```bash
 # π0 policy (requires pi0 server)
-uv run limb/envs/launch.py --config_path configs/yam/yam_pi0_bimanual.yaml
+uv run limb/envs/launch.py --config_path configs/yam_pi0_bimanual.yaml
 
 # Diffusion policy (requires websocket server)
-uv run limb/envs/launch.py --config_path configs/yam/yam_diffusion_bimanual.yaml
+uv run limb/envs/launch.py --config_path configs/yam_diffusion_bimanual.yaml
 ```
 
 ### GELLO Network Mode (R1 Lite remote)
@@ -193,7 +194,7 @@ bash scripts/install_xrobotoolkit_sdk.sh
 Configs are YAML files loaded by OmegaConf. Every object uses `_target_` for dynamic instantiation:
 
 ```yaml
-# configs/yam/yam_viser_bimanual.yaml
+# configs/yam_viser_bimanual.yaml
 _target_: limb.envs.launch.LaunchConfig
 hz: 100
 cameras:

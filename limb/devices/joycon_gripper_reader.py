@@ -15,8 +15,8 @@ device detection and reconnection.
 """
 
 import logging
-import time
 import threading
+import time
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -115,8 +115,9 @@ class JoyConGripperReader:
 
     def _run(self, side: str) -> None:
         """Event loop for one Joy-Con (left or right)."""
-        from evdev import InputDevice, ecodes
         import select
+
+        from evdev import InputDevice, ecodes
 
         if side == "left":
             axis_code = ecodes.ABS_Y

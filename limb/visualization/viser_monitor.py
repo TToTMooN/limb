@@ -87,13 +87,11 @@ class ViserMonitor:
         """Load the YAM URDF and add it to the Viser scene."""
         import yourdfpy
 
-        current_path = os.path.dirname(os.path.abspath(__file__))
-        urdf_path = os.path.normpath(
-            os.path.join(current_path, "..", "..", "..", "dependencies", "i2rt", "i2rt", "robot_models", "yam", "yam.urdf")
-        )
-        mesh_dir = os.path.normpath(
-            os.path.join(current_path, "..", "..", "..", "dependencies", "i2rt", "i2rt", "robot_models", "yam", "assets")
-        )
+        from limb import ROOT_PATH
+
+        yam_models = os.path.join(ROOT_PATH, "dependencies", "i2rt", "i2rt", "robot_models", "yam")
+        urdf_path = os.path.join(yam_models, "yam.urdf")
+        mesh_dir = os.path.join(yam_models, "assets")
 
         urdf = yourdfpy.URDF.load(urdf_path, mesh_dir=mesh_dir)
 

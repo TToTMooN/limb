@@ -6,8 +6,8 @@ Ask the user:
 3. Which cameras to use (names and serial numbers)
 4. Action chunk size (how many steps to execute per inference)
 
-Then create a new YAML config at configs/yam/yam_<policy>_bimanual.yaml
-based on the structure of configs/yam/yam_viser_bimanual.yaml, but replacing
+Then create a new YAML config at configs/yam_<policy>_bimanual.yaml
+based on the structure of configs/yam_viser_bimanual.yaml, but replacing
 the agent section with the appropriate policy agent:
 
 For π0:

@@ -92,12 +92,12 @@ def _make_raw_table(
 def test_raw_input(port: str, baudrate: int, bimanual: bool, host: str | None = None, network_port: int = 5555) -> None:
     """Print raw Dynamixel joint positions with rich Live display."""
     if host is not None:
-        from limb.dynamixel.network_dynamixel_reader import NetworkDynamixelReader
+        from limb.devices.network_dynamixel_reader import NetworkDynamixelReader
 
         print(f"Connecting to {host}:{network_port} (network mode, bimanual={bimanual})...")
         reader = NetworkDynamixelReader(host=host, port=network_port)
     else:
-        from limb.dynamixel.dynamixel_reader import DynamixelReader
+        from limb.devices.dynamixel_reader import DynamixelReader
 
         left_ids = [1, 2, 3, 4, 5, 6]
         right_ids = [7, 8, 9, 10, 11, 12]

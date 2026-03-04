@@ -16,16 +16,15 @@ from copy import deepcopy
 from typing import Dict, Literal, Optional
 
 import numpy as np
+import pink
 import pinocchio as pin
 import viser
 import viser.extras
 import viser.transforms as vtf
-
-import pink
 from pink import solve_ik
 from pink.tasks import FrameTask, PostureTask
 
-from limb.robots.viser.viser_base import TransformHandle, ViserAbstractBase, _AUTO_VISER
+from limb.visualization.viser_base import _AUTO_VISER, TransformHandle, ViserAbstractBase
 
 TARGET_LINK = "link_6"
 

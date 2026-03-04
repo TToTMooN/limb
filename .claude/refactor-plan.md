@@ -45,7 +45,7 @@ Strip the repo to only what's needed for YAM bimanual arms:
 - [x] Verified no broken imports remain
 
 ### Kept (still in use)
-- `limb/input_devices/` (JoyCon gripper for GELLO teleop)
+- `limb/devices/` (GELLO readers, JoyCon gripper, VR client)
 - `evdev` dependency (required by JoyCon)
 
 ## Status: Phase 1+2 COMPLETE

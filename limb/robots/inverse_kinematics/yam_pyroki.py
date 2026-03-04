@@ -12,7 +12,7 @@ import viser.extras
 import viser.transforms as vtf
 
 from limb.robots.inverse_kinematics.pyroki_snippets._solve_ik import solve_ik
-from limb.robots.viser.viser_base import TransformHandle, ViserAbstractBase, _AUTO_VISER
+from limb.visualization.viser_base import _AUTO_VISER, TransformHandle, ViserAbstractBase
 
 
 class YamPyroki(ViserAbstractBase):
