@@ -35,6 +35,7 @@ dependencies = [
     "uvicorn",
     "fastapi",
     "loguru",
+    "robocam",
 
     "xdof_sdk",
     "dynamixel-sdk",
@@ -45,11 +46,14 @@ dependencies = [
 
 [project.optional-dependencies]
 sensors = [
-    "pyzed",
+    "robocam[zed]",
+]
+all = [
+    "robocam[zed]",
 ]
 [tool.uv.sources]
-pyzed = { path = "dependencies/pyzed-5.1-cp311-cp311-linux_x86_64.whl" }
 i2rt = { path = "dependencies/i2rt", editable = true }
+robocam = { path = "packages/robocam", editable = true }
 
 [tool.uv]
 

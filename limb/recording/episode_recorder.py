@@ -24,9 +24,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import cv2
 import numpy as np
 from loguru import logger
+from robocam import AsyncVideoWriter
 
 from limb.core.observation import Observation
 
@@ -65,8 +65,8 @@ class EpisodeRecorder:
         self._arm_states: Dict[str, Dict[str, List[np.ndarray]]] = {}
         self._actions: Dict[str, Dict[str, List[np.ndarray]]] = {}
 
-        # Video writers
-        self._writers: Dict[str, cv2.VideoWriter] = {}
+        # Video writers (async ffmpeg-based, NVENC when available)
+        self._writers: Dict[str, AsyncVideoWriter] = {}
         self._cam_timestamps: Dict[str, List[float]] = {}
 
         # Metadata
@@ -154,15 +154,16 @@ class EpisodeRecorder:
                 if "vel" in arm_action:
                     self._actions[arm_name].setdefault("vel", []).append(np.asarray(arm_action["vel"]))
 
-            # Record camera frames as video
+            # Record camera frames as video (async, NVENC when available)
             for cam_name, cam_obs in obs.cameras.items():
                 if cam_name not in self._writers:
                     h, w = cam_obs.rgb.shape[:2]
-                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                     path = str(self._episode_dir / f"{cam_name}.mp4")
-                    self._writers[cam_name] = cv2.VideoWriter(path, fourcc, self.recording_fps, (w, h))
+                    writer = AsyncVideoWriter(path=path, width=w, height=h, fps=self.recording_fps)
+                    writer.start()
+                    self._writers[cam_name] = writer
                     self._cam_timestamps[cam_name] = []
-                self._writers[cam_name].write(cv2.cvtColor(cam_obs.rgb, cv2.COLOR_RGB2BGR))
+                self._writers[cam_name].write(cam_obs.rgb)
                 self._cam_timestamps[cam_name].append(cam_obs.timestamp)
 
             self._step_idx += 1
@@ -180,9 +181,9 @@ class EpisodeRecorder:
         episode_dir = self._episode_dir
         self._recording = False
 
-        # Close video writers
+        # Flush async video writers (waits for ffmpeg to finish)
         for w in self._writers.values():
-            w.release()
+            w.stop()
 
         # Save timestamps
         np.save(str(episode_dir / "timestamps.npy"), np.array(self._timestamps, dtype=np.float64))

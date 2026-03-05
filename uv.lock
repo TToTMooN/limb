@@ -880,6 +880,7 @@ dependencies = [
     { name = "pyroki" },
     { name = "qpsolvers", extra = ["quadprog"] },
     { name = "rerun-sdk" },
+    { name = "robocam" },
     { name = "robot-descriptions" },
     { name = "ruff" },
     { name = "tyro" },
@@ -891,8 +892,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "robocam", extra = ["zed"] },
+]
 sensors = [
-    { name = "pyzed" },
+    { name = "robocam", extra = ["zed"] },
 ]
 
 [package.dev-dependencies]
@@ -921,9 +925,11 @@ requires-dist = [
     { name = "pyarrow" },
     { name = "pyrealsense2" },
     { name = "pyroki", git = "https://github.com/chungmin99/pyroki.git" },
-    { name = "pyzed", marker = "extra == 'sensors'", path = "dependencies/pyzed-5.1-cp311-cp311-linux_x86_64.whl" },
     { name = "qpsolvers", extras = ["quadprog"] },
     { name = "rerun-sdk", specifier = "==0.30.1" },
+    { name = "robocam", editable = "packages/robocam" },
+    { name = "robocam", extras = ["zed"], marker = "extra == 'all'", editable = "packages/robocam" },
+    { name = "robocam", extras = ["zed"], marker = "extra == 'sensors'", editable = "packages/robocam" },
     { name = "robot-descriptions" },
     { name = "ruff" },
     { name = "tyro" },
@@ -933,7 +939,7 @@ requires-dist = [
     { name = "xdof-sdk" },
     { name = "yourdfpy" },
 ]
-provides-extras = ["sensors"]
+provides-extras = ["sensors", "all"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.12.3" }]
@@ -1663,14 +1669,14 @@ wheels = [
 
 [[package]]
 name = "pyzed"
-version = "5.1"
-source = { path = "dependencies/pyzed-5.1-cp311-cp311-linux_x86_64.whl" }
+version = "5.2"
+source = { path = "packages/robocam/vendor/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
 dependencies = [
     { name = "cython" },
     { name = "numpy" },
 ]
 wheels = [
-    { filename = "pyzed-5.1-cp311-cp311-linux_x86_64.whl", hash = "sha256:c4401793e0ccb3c16b2494a174bbc3e6c5eedcbac33662941883b366733e5090" },
+    { filename = "pyzed-5.2-cp311-cp311-linux_x86_64.whl", hash = "sha256:c236065cc97f7235fb2e73586c0a60b700bb7361ed73252330f8f5a87addc71a" },
 ]
 
 [package.metadata]
@@ -1777,6 +1783,35 @@ sdist = { url = "https://files.pythonhosted.org/packages/fb/d2/8920e102050a0de7b
 wheels = [
     { url = "https://files.pythonhosted.org/packages/25/7a/b0178788f8dc6cafce37a212c99565fa1fe7872c70c6c9c1e1a372d9d88f/rich-14.2.0-py3-none-any.whl", hash = "sha256:76bc51fe2e57d2b1be1f96c524b890b816e334ab4c1e45888799bfaab0021edd", size = 243393, upload-time = "2025-10-09T14:16:51.245Z" },
 ]
+
+[[package]]
+name = "robocam"
+version = "0.1.0"
+source = { editable = "packages/robocam" }
+dependencies = [
+    { name = "loguru" },
+    { name = "numpy" },
+]
+
+[package.optional-dependencies]
+zed = [
+    { name = "pyzed" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "loguru" },
+    { name = "numpy" },
+    { name = "opencv-contrib-python", marker = "extra == 'all'" },
+    { name = "opencv-contrib-python", marker = "extra == 'image'" },
+    { name = "opencv-contrib-python", marker = "extra == 'opencv'" },
+    { name = "pillow", marker = "extra == 'all'" },
+    { name = "pillow", marker = "extra == 'image'" },
+    { name = "pyrealsense2", marker = "extra == 'all'" },
+    { name = "pyrealsense2", marker = "extra == 'realsense'" },
+    { name = "pyzed", marker = "extra == 'zed'", path = "packages/robocam/vendor/pyzed-5.2-cp311-cp311-linux_x86_64.whl" },
+]
+provides-extras = ["realsense", "zed", "opencv", "image", "all"]
 
 [[package]]
 name = "robot-descriptions"
