@@ -50,6 +50,8 @@ limb/
     viser_monitor.py      # Camera feeds + video recording
   recording/
     episode_recorder.py   # Raw episode recording (states/actions/video)
+    trigger.py            # Hands-free trigger signals (keyboard/foot pedal/VR)
+    session.py            # Multi-episode data collection session manager
   sensors/
     cameras/
       camera.py           # Camera protocol
@@ -63,33 +65,36 @@ limb/
     depth_utils.py        # Point cloud processing
 scripts/                  # Standalone diagnostic scripts
 docs/
+  teleop.md               # Detailed teleop docs
+  data_collection.md      # Data collection + episode recording docs
   policy_server_spec.md   # Spec for companion policy server repo
 dependencies/             # Git submodules: i2rt, XRoboToolkit
 ```
 
-### Control loop
+### Control loop + process model
 
 ```
-launch.py
-  └─ RobotEnv.step() @ 100 Hz
-       ├─ Agent.act(obs) → action
-       │    teleop:  device → IK → joint targets
-       │    policy:  obs → PolicyClient.infer() → action chunk → joint targets
-       ├─ Robot.command(action) → CAN bus → DM motors
-       ├─ ViserMonitor.update(obs)      # optional: camera feeds + URDF
-       └─ EpisodeRecorder.record(obs, action)  # optional: raw data capture
+Process 1..N (Portal): Cameras, robots, agent  # separate processes for HW isolation
+────────────────────────────────────────
+Main process, main thread:
+  └─ control loop @ 100 Hz
+       ├─ Agent.act(obs) → action           # Portal RPC
+       ├─ session.step(obs, action)          # trigger poll + recording
+       │    or recorder.record(obs, action)  # direct recording mode
+       ├─ RobotEnv.step(action)              # Portal RPC
+       └─ ViserMonitor.update(obs)           # viser has own server thread
 ```
+
+Episode save (~100-200ms) runs synchronously between episodes. Robot holds last commanded position.
 
 ### Observation format
 
-`Observation.to_dict()` produces:
 ```python
 {
   "timestamp": float,
   "left": {"joint_pos": (6,), "joint_vel": (6,), "gripper_pos": (1,), "ee_pose": (7,)},
   "right": {"joint_pos": (6,), "joint_vel": (6,), "gripper_pos": (1,), "ee_pose": (7,)},
   "left_wrist_camera": {"images": {"rgb": (H,W,3)}, "timestamp": float},
-  "right_wrist_camera": {"images": {"rgb": (H,W,3)}, "timestamp": float},
 }
 ```
 
@@ -97,181 +102,69 @@ launch.py
 
 ```python
 {"left": {"pos": (7,)}, "right": {"pos": (7,)}}  # 6 joints + 1 gripper
-# If use_joint_state_as_action: also includes "vel": (7,) per arm
 ```
 
 ---
 
 ## Launch Commands
 
-### Teleoperation
-
 ```bash
+# Teleoperation
 uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml
 uv run limb/envs/launch.py --config_path configs/yam_gello_bimanual.yaml
 uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml
-```
 
-### VLA Policy Deployment
+# Data collection
+uv run limb/envs/launch.py --config_path configs/yam_gello_collect.yaml
+uv run limb/envs/launch.py --config_path configs/yam_vr_collect.yaml
 
-```bash
-# OpenPI (pi0/pi0-FAST) — requires OpenPI server at host:port
+# Policy deployment
 uv run limb/envs/launch.py --config_path configs/yam_pi0_bimanual.yaml
-
-# Generic policy server — requires server implementing docs/policy_server_spec.md
 uv run limb/envs/launch.py --config_path configs/yam_policy_bimanual.yaml
-```
 
-### Hardware Diagnostics
-
-```bash
+# Diagnostics
 uv run scripts/test_realsense_cameras.py
 uv run scripts/test_gello_input.py
 uv run scripts/test_vr_input.py
 ```
 
-### GELLO Network Mode (R1 Lite)
-
-```bash
-bash scripts/start_gello_server.sh        # Start on R1 Lite (10.42.0.1)
-bash scripts/start_gello_server.sh --kill  # Kill remote server
-```
-
----
-
-## VLA Policy Integration
-
-Policies run as external servers. limb connects via `PolicyClient`:
-
-```
-┌─ Robot machine (limb) ──────────┐     ┌─ GPU machine ────────────┐
-│ RobotEnv → obs                  │     │ Policy server             │
-│ YamPolicyAgent                  │     │  (OpenPI / LeRobot / etc) │
-│   ├─ ObsTransform → flat obs   │────▶│  model.infer(obs)         │
-│   ├─ PolicyClient.infer()      │◀────│  → action chunk           │
-│   ├─ ActionChunkManager        │     └───────────────────────────┘
-│   └─ ActionTransform → action  │
-│ Robot.command(action)           │
-└─────────────────────────────────┘
-```
-
-**PolicyClient implementations:**
-- `OpenPIClient` — wraps `openpi_client` for pi0/pi0-FAST/pi0.5
-- `WebSocketPolicyClient` — generic msgpack+WebSocket (see `docs/policy_server_spec.md`)
-
-**Transforms** are YAML-configurable (no hardcoded key mappings):
-- `ObsTransform` / `OpenPIObsTransform` — key remapping, image resize, state concatenation
-- `ActionTransform` — bimanual split, gripper clip
-
-**Action chunking:** `ActionChunkManager` buffers multi-step action chunks with
-temporal smoothing (weighted linear interpolation across overlapping chunks).
-
----
-
-## Episode Recording
-
-`EpisodeRecorder` captures raw control loop data. Configured in YAML:
-
-```yaml
-recording:
-  _target_: limb.recording.episode_recorder.EpisodeRecorder
-  base_dir: "recordings"
-  recording_fps: 30
-  auto_start: true
-  ee_frame_names: {left: "ee_link", right: "ee_link"}
-```
-
-Output per episode:
-```
-recordings/episode_20260304_153045_0001/
-  metadata.json              # config, timing, ee frame names, arm/camera lists
-  timestamps.npy             # (N,) float64 Unix timestamps at control rate
-  left_states.npz            # joint_pos (N,6), joint_vel (N,6), gripper_pos (N,1), ee_pose (N,7)
-  right_states.npz
-  left_actions.npz           # pos (N,7)
-  right_actions.npz
-  left_wrist_camera.mp4      # video
-  left_wrist_camera_timestamps.npy  # per-frame camera timestamps
-  ...
-```
-
-Post-processing to HDF5/LeRobot/other formats is done by separate scripts (not in limb).
-
 ---
 
 ## Config System
 
-YAML files with `_target_` for dynamic instantiation (Hydra-like, but custom):
+YAML files with `_target_` for dynamic instantiation (Hydra-like, but custom `instantiate()`):
 
 ```yaml
 _target_: limb.envs.launch.LaunchConfig
 hz: 100.0
-sensors:
-  cameras:
-    left_wrist_camera:
-      _target_: limb.sensors.cameras.camera.CameraNode
-      camera:
-        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
-        serial_number: "409122274017"
 robots:
   left: ["robot_configs/yam/left.yaml"]
   right: ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
 agent:
-  _target_: limb.agents.teleoperation.yam_viser_agent.YamViserAgent
-  bimanual: true
-  ik_solver: "pink"
+  _target_: limb.agents.teleoperation.yam_gello_agent.YamGelloAgent
+collection:  # or recording: for standalone mode
+  _target_: limb.recording.session.DataCollectionSession
+  num_episodes: 10
+  trigger:
+    _target_: limb.recording.trigger.KeyboardTrigger
 ```
 
-Robot configs (`robot_configs/yam/left.yaml`, `right.yaml`) specify motor chain
-(CAN IDs, motor types, interface name), PID gains, joint limits, URDF path.
-
----
-
-## Hardware Setup
-
-### CAN Interface (YAM arms)
-
-```bash
-echo 'SUBSYSTEM=="net", KERNEL=="can*", ACTION=="add", RUN+="/sbin/ip link set %k up type can bitrate 1000000"' \
-  | sudo tee /etc/udev/rules.d/99-can.rules
-sudo udevadm control --reload && sudo udevadm trigger
-```
-
-Verify: `ip link show | grep can` — expect `can_follow_l` and `can_follow_r`.
-
-### GELLO (Dynamixel)
-
-USB-to-serial at 4 Mbps. Network mode: TCP at `10.42.0.1:port`.
-
-### VR (Pico headset)
-
-```bash
-bash scripts/install_xrobotoolkit_sdk.sh
-```
-
----
-
-## IK Solvers
-
-| Solver | Library | Style | Use When |
-|--------|---------|-------|----------|
-| `YamPink` | Pinocchio + QP | Differential (velocity) | Production, smooth |
-| `YamPyroki` | JAX | Global (one-shot) | Fast startup |
-
-Both support bimanual and expose `self.joints` dict.
+Robot configs (`robot_configs/yam/left.yaml`, `right.yaml`) specify motor chain (CAN IDs, motor types), PID gains, joint limits, URDF path.
 
 ---
 
 ## Development Conventions
 
-- **Package manager**: `uv` (not pip)
-- **Python**: 3.11
-- **Linter**: `ruff` (line length 119)
-- **Logging**: `loguru` (`from loguru import logger`)
-- **Rate control**: `Rate` class from `robots/utils.py`
+- **Package manager**: `uv` (not pip). Run everything with `uv run`.
+- **Python**: 3.11 exactly
+- **CLI args**: `tyro` — use `tyro.cli(Args)` for script entry points (not argparse/click)
+- **Logging**: `loguru` everywhere — `from loguru import logger`. Never use `print()` or `logging`.
+- **Linter**: `ruff` (line length 119, config in pyproject.toml)
+- **Config**: OmegaConf + custom `instantiate()` (not Hydra). `_target_` pattern for dynamic class creation.
 - **Multi-process RPC**: `portal` library with `@remote()` decorator
-- **Config**: OmegaConf + custom `instantiate()` (not Hydra)
-- **Lazy imports**: Optional deps (openpi_client, websockets) imported inside methods
+- **Rate control**: `Rate` class from `robots/utils.py`
+- **Dataclasses**: All configurable components are `@dataclass` for `_target_` instantiation
+- **Lazy imports**: Optional deps (openpi_client, websockets, evdev) imported inside methods
 
 ### Lint
 
@@ -298,6 +191,7 @@ dynamixel-sdk    # GELLO input device
 websockets       # Policy server client
 msgpack          # Wire serialization
 loguru           # Logging
+tyro             # CLI argument parsing
 ```
 
 Install: `uv sync`

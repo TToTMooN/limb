@@ -91,7 +91,7 @@ class EpisodeRecorder:
         """Begin recording a new episode. Returns the episode directory path."""
         with self._lock:
             if self._recording:
-                self.stop_episode()
+                self._stop_episode_unlocked()
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             self._episode_dir = Path(self.base_dir) / f"episode_{ts}_{self._episode_count:04d}"
@@ -170,58 +170,62 @@ class EpisodeRecorder:
     def stop_episode(self) -> Optional[Path]:
         """Finish the current episode, flush all data to disk."""
         with self._lock:
-            if not self._recording:
-                return None
+            return self._stop_episode_unlocked()
 
-            episode_dir = self._episode_dir
-            self._recording = False
+    def _stop_episode_unlocked(self) -> Optional[Path]:
+        """Internal stop — caller must hold self._lock."""
+        if not self._recording:
+            return None
 
-            # Close video writers
-            for w in self._writers.values():
-                w.release()
+        episode_dir = self._episode_dir
+        self._recording = False
 
-            # Save timestamps
-            np.save(str(episode_dir / "timestamps.npy"), np.array(self._timestamps, dtype=np.float64))
+        # Close video writers
+        for w in self._writers.values():
+            w.release()
 
-            # Save per-camera timestamps
-            for cam_name, cam_ts in self._cam_timestamps.items():
-                np.save(str(episode_dir / f"{cam_name}_timestamps.npy"), np.array(cam_ts, dtype=np.float64))
+        # Save timestamps
+        np.save(str(episode_dir / "timestamps.npy"), np.array(self._timestamps, dtype=np.float64))
 
-            # Save arm states as npz
-            for arm_name, state_dict in self._arm_states.items():
-                arrays = {}
-                for key, val_list in state_dict.items():
-                    if val_list:
-                        arrays[key] = np.stack(val_list)
-                if arrays:
-                    np.savez(str(episode_dir / f"{arm_name}_states.npz"), **arrays)
+        # Save per-camera timestamps
+        for cam_name, cam_ts in self._cam_timestamps.items():
+            np.save(str(episode_dir / f"{cam_name}_timestamps.npy"), np.array(cam_ts, dtype=np.float64))
 
-            # Save actions as npz
-            for arm_name, action_dict in self._actions.items():
-                arrays = {}
-                for key, val_list in action_dict.items():
-                    if val_list:
-                        arrays[key] = np.stack(val_list)
-                if arrays:
-                    np.savez(str(episode_dir / f"{arm_name}_actions.npz"), **arrays)
+        # Save arm states as npz
+        for arm_name, state_dict in self._arm_states.items():
+            arrays = {}
+            for key, val_list in state_dict.items():
+                if val_list:
+                    arrays[key] = np.stack(val_list)
+            if arrays:
+                np.savez(str(episode_dir / f"{arm_name}_states.npz"), **arrays)
 
-            # Save metadata
-            self._metadata["end_time"] = time.time()
-            self._metadata["num_steps"] = self._step_idx
-            self._metadata["duration_s"] = self._metadata["end_time"] - self._metadata["start_time"]
-            self._metadata["recording_fps"] = self.recording_fps
-            self._metadata["cameras"] = list(self._cam_timestamps.keys())
-            self._metadata["arms"] = list(self._arm_states.keys())
-            with open(str(episode_dir / "metadata.json"), "w") as f:
-                json.dump(self._metadata, f, indent=2, default=str)
+        # Save actions as npz
+        for arm_name, action_dict in self._actions.items():
+            arrays = {}
+            for key, val_list in action_dict.items():
+                if val_list:
+                    arrays[key] = np.stack(val_list)
+            if arrays:
+                np.savez(str(episode_dir / f"{arm_name}_actions.npz"), **arrays)
 
-            logger.info(
-                "Episode saved: {} ({} steps, {:.1f}s)",
-                episode_dir,
-                self._step_idx,
-                self._metadata["duration_s"],
-            )
-            return episode_dir
+        # Save metadata
+        self._metadata["end_time"] = time.time()
+        self._metadata["num_steps"] = self._step_idx
+        self._metadata["duration_s"] = self._metadata["end_time"] - self._metadata["start_time"]
+        self._metadata["recording_fps"] = self.recording_fps
+        self._metadata["cameras"] = list(self._cam_timestamps.keys())
+        self._metadata["arms"] = list(self._arm_states.keys())
+        with open(str(episode_dir / "metadata.json"), "w") as f:
+            json.dump(self._metadata, f, indent=2, default=str)
+
+        logger.info(
+            "Episode saved: {} ({} steps, {:.1f}s)",
+            episode_dir,
+            self._step_idx,
+            self._metadata["duration_s"],
+        )
+        return episode_dir
 
     def close(self) -> None:
         """Stop recording and clean up."""

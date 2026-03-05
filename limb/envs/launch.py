@@ -19,10 +19,11 @@ from limb.core.observation import Observation, arm_obs_from_dict
 from limb.envs.configs.instantiate import instantiate
 from limb.envs.configs.loader import DictLoader
 from limb.envs.robot_env import RobotEnv
+from limb.recording.episode_recorder import EpisodeRecorder
+from limb.recording.session import DataCollectionSession
 from limb.robots.robot import Robot
 from limb.robots.utils import Rate, Timeout
 from limb.sensors.cameras.camera import CameraDriver
-from limb.recording.episode_recorder import EpisodeRecorder
 from limb.utils.launch_utils import (
     cleanup_processes,
     initialize_agent,
@@ -62,6 +63,7 @@ class LaunchConfig:
     save_path: Optional[str] = None
     station_metadata: Dict[str, str] = field(default_factory=dict)
     recording: Optional[Dict[str, Any]] = None  # EpisodeRecorder config (None = no recording)
+    collection: Optional[Dict[str, Any]] = None  # DataCollectionSession config (managed episodes)
     sim_mode: bool = False  # skip CAN/sensors, instantiate robots & agent in-process
     enable_monitor: bool = True  # launch ViserMonitor for camera feeds + recording
 
@@ -325,14 +327,18 @@ def main(args: Args) -> None:
             logger.info("Moving to initial teleop pose (safe slow motion)...")
             _safe_move_robots(robots, initial_targets)
 
-        # --- Episode recorder ---
+        # --- Episode recorder / collection session ---
         recorder: Optional[EpisodeRecorder] = None
-        if main_config.recording is not None:
+        session: Optional[DataCollectionSession] = None
+        if main_config.collection is not None:
+            session = instantiate(main_config.collection)
+            logger.info("DataCollectionSession configured (target={} episodes)", session.num_episodes)
+        elif main_config.recording is not None:
             recorder = instantiate(main_config.recording)
             logger.info("EpisodeRecorder configured (base_dir={})", recorder.base_dir)
 
         logger.info("Starting control loop...")
-        _run_control_loop(env, agent, main_config, monitor=monitor, recorder=recorder)
+        _run_control_loop(env, agent, main_config, monitor=monitor, recorder=recorder, session=session)
 
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received, initiating safe shutdown...")
@@ -360,7 +366,9 @@ def main(args: Args) -> None:
             except Exception as e:
                 logger.warning(f"Error during safe shutdown: {e}")
 
-        if "recorder" in locals() and recorder is not None:
+        if "session" in locals() and session is not None:
+            session.close()
+        elif "recorder" in locals() and recorder is not None:
             recorder.close()
         if "monitor" in locals() and monitor is not None:
             monitor.close()
@@ -444,6 +452,7 @@ def _run_control_loop(
     config: LaunchConfig,
     monitor: Optional[ViserMonitor] = None,
     recorder: Optional[EpisodeRecorder] = None,
+    session: Optional[DataCollectionSession] = None,
 ) -> None:
     """Run the main control loop.  Exits when _shutdown_requested is set by SIGINT."""
     steps = 0
@@ -456,14 +465,19 @@ def _run_control_loop(
         with Timeout(30, "Agent action"):
             action = agent.act(obs.to_dict())
 
+        # Data collection session manages recording + trigger signals
+        if session is not None:
+            if not session.step(obs, action):
+                break  # session complete or quit signal
+        elif recorder is not None and recorder.is_recording:
+            # Standalone recorder: record pre-step (s_t, a_t)
+            recorder.record(obs, action)
+
         with Timeout(1, "Env step", "warning"):
             obs = env.step(action)
 
         if monitor is not None:
             monitor.update(obs)
-
-        if recorder is not None and recorder.is_recording:
-            recorder.record(obs, action)
 
         steps += 1
         loop_count += 1
