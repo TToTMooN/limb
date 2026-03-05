@@ -154,3 +154,59 @@ Robot holds last commanded position during save.
 - **TriggerSource.get_signal()** — non-blocking poll, ~0ms (select with 0 timeout for keyboard, bool check for VR)
 - **EpisodeRecorder.record()** — list append + cv2.VideoWriter.write, ~1-3ms per step
 - **EpisodeRecorder.stop_episode()** — numpy save + video flush, ~100-200ms (runs between episodes)
+
+---
+
+## Data Tools
+
+### Visualize Episodes (Rerun)
+
+View recorded episodes with synchronized joint trajectories, gripper state, EE pose, and camera video:
+
+```bash
+# Full visualization (joints + cameras)
+uv run scripts/data/visualize_episode.py --episode_dir recordings/red_cube_task/episode_20260304_153045_0001
+
+# Joint data only (skip video decoding)
+uv run scripts/data/visualize_episode.py --episode_dir recordings/red_cube_task/episode_20260304_153045_0001 --no-video
+```
+
+Opens the [Rerun](https://rerun.io) viewer with a timeline scrubber. Per-joint position/velocity traces, gripper state, and camera frames are all time-aligned.
+
+### Convert to LeRobot Format
+
+Convert a session (directory of episodes) to [LeRobot v2.1](https://github.com/huggingface/lerobot) dataset format. No lerobot dependency required — only uses pyarrow:
+
+```bash
+# Convert all episodes in a session
+uv run scripts/data/convert_to_lerobot.py --input_dir recordings/red_cube_task --output_dir datasets/red_cube
+
+# Only include successful episodes
+uv run scripts/data/convert_to_lerobot.py --input_dir recordings/red_cube_task --output_dir datasets/red_cube --success_only
+
+# Override task instruction
+uv run scripts/data/convert_to_lerobot.py --input_dir recordings/red_cube_task --output_dir datasets/red_cube \
+  --task "pick up the red cube and place it in the bowl"
+```
+
+Output structure:
+
+```
+datasets/red_cube/
+  meta/
+    info.json          # dataset metadata, feature shapes, fps
+    stats.json         # per-feature min/max/mean/std
+    episodes.jsonl     # episode lengths and task labels
+    tasks.jsonl        # task index → instruction string
+  data/
+    chunk-000/
+      episode_000000.parquet   # state + action vectors per frame
+      episode_000001.parquet
+  videos/
+    observation.images.left_wrist_camera/
+      chunk-000/
+        episode_000000.mp4
+    observation.images.right_wrist_camera/
+      chunk-000/
+        episode_000000.mp4
+```

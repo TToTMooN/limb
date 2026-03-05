@@ -32,6 +32,12 @@ uv sync
 
 > **Submodule:** Includes [i2rt](https://github.com/i2rt-robotics/i2rt) (motor driver) under `dependencies/`. Clone with `--recurse-submodules`.
 
+> **VR teleop:** XRoboToolkit SDK requires a separate install after `uv sync`:
+> ```bash
+> bash scripts/install_xrobotoolkit_sdk.sh
+> ```
+> <!-- TODO: add xrobotoolkit_sdk as a uv source dependency to eliminate manual install -->
+
 ---
 
 ## Hardware Setup
@@ -83,8 +89,17 @@ uv run limb/envs/launch.py --config_path configs/yam_policy_bimanual.yaml    # G
 ### Data Tools
 
 ```bash
-uv run scripts/data/visualize_episode.py --episode_dir recordings/episode_... # Rerun viewer
-uv run scripts/data/convert_to_lerobot.py --input_dir recordings/ --output_dir datasets/  # LeRobot format
+# Visualize a recorded episode in Rerun (joint trajectories + camera video)
+uv run scripts/data/visualize_episode.py --episode_dir recordings/red_cube_task/episode_20260304_153045_0001
+
+# Skip video (faster, joint data only)
+uv run scripts/data/visualize_episode.py --episode_dir recordings/red_cube_task/episode_20260304_153045_0001 --no-video
+
+# Convert a session to LeRobot v2.1 format (no lerobot dependency needed)
+uv run scripts/data/convert_to_lerobot.py --input_dir recordings/red_cube_task --output_dir datasets/red_cube
+
+# Only include successful episodes
+uv run scripts/data/convert_to_lerobot.py --input_dir recordings/red_cube_task --output_dir datasets/red_cube --success_only
 ```
 
 ### Diagnostics
