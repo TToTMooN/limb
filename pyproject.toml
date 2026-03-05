@@ -52,9 +52,6 @@ pyzed = { path = "dependencies/pyzed-5.1-cp311-cp311-linux_x86_64.whl" }
 i2rt = { path = "dependencies/i2rt", editable = true }
 
 [tool.uv]
-override-dependencies = [
-    "numpy==1.26.4",
-]
 
 [tool.setuptools.packages.find]
 where = ["."]
