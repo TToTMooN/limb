@@ -1,0 +1,25 @@
+# Data collection overlay — merge with any teleop config.
+#
+# Usage:
+#   uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
+#
+# Controls:
+#   Space / Enter  →  Start/stop recording (foot pedal sends Enter)
+#   S              →  Mark episode as success and save
+#   D              →  Discard current episode
+#   Q / Escape     →  End collection session
+
+collection:
+  _target_: limb.recording.session.DataCollectionSession
+  num_episodes: 10
+  task_instruction: "pick up the red cube and place it in the bowl"
+  countdown_s: 3.0
+  recorder:
+    _target_: limb.recording.episode_recorder.EpisodeRecorder
+    base_dir: "recordings"
+    recording_fps: 30
+    ee_frame_names:
+      left: "ee_link"
+      right: "ee_link"
+  trigger:
+    _target_: limb.recording.trigger.KeyboardTrigger
