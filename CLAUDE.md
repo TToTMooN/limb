@@ -114,9 +114,9 @@ uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml
 uv run limb/envs/launch.py --config_path configs/yam_gello_bimanual.yaml
 uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml
 
-# Data collection
-uv run limb/envs/launch.py --config_path configs/yam_gello_collect.yaml
-uv run limb/envs/launch.py --config_path configs/yam_vr_collect.yaml
+# Data collection (overlay configs — combine with any teleop config)
+uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
+uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
 
 # Policy deployment
 uv run limb/envs/launch.py --config_path configs/yam_pi0_bimanual.yaml

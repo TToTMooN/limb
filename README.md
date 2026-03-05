@@ -66,9 +66,11 @@ uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml       # Pi
 
 ### Data Collection
 
+Collection configs are overlays — combine with any teleop config:
+
 ```bash
-uv run limb/envs/launch.py --config_path configs/yam_gello_collect.yaml     # GELLO + foot pedal
-uv run limb/envs/launch.py --config_path configs/yam_vr_collect.yaml        # VR + button triggers
+uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
+uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
 ```
 
 ### Policy Deployment

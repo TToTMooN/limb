@@ -1,0 +1,28 @@
+# Data collection overlay for VR teleop — merge with VR teleop config.
+#
+# Usage:
+#   uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
+#
+# VR button triggers (hands-free):
+#   B (right controller)  →  Start/stop recording
+#   Y (left controller)   →  Discard current episode
+# Keyboard fallback:
+#   Space / Enter / S / D / Q  →  same as collection.yaml
+
+collection:
+  _target_: limb.recording.session.DataCollectionSession
+  num_episodes: 10
+  task_instruction: "pick up the red cube and place it in the bowl"
+  countdown_s: 3.0
+  recorder:
+    _target_: limb.recording.episode_recorder.EpisodeRecorder
+    base_dir: "recordings"
+    recording_fps: 30
+    ee_frame_names:
+      left: "ee_link"
+      right: "ee_link"
+  trigger:
+    _target_: limb.recording.trigger.CompositeTrigger
+    sources:
+      - _target_: limb.recording.trigger.KeyboardTrigger
+      # VRButtonTrigger requires xr_client from the agent — wire at runtime

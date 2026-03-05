@@ -6,13 +6,20 @@ limb records raw episode data during teleoperation. Post-processing to HDF5, LeR
 
 ## Quick Start
 
-```bash
-# GELLO teleop + keyboard/foot pedal triggers
-uv run limb/envs/launch.py --config_path configs/yam_gello_collect.yaml
+Collection configs are overlays — combine with any teleop config:
 
-# VR teleop + VR button triggers
-uv run limb/envs/launch.py --config_path configs/yam_vr_collect.yaml
+```bash
+# GELLO (network) + keyboard/foot pedal triggers
+uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
+
+# VR + VR button triggers
+uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
+
+# Viser + keyboard triggers
+uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml configs/collection.yaml
 ```
+
+The second YAML merges into the first via OmegaConf, adding the `collection:` block without duplicating teleop/robot/camera config.
 
 ---
 
