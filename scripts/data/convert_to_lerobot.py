@@ -49,6 +49,7 @@ class Args:
     robot_type: str = "yam"
     fps: int = 30
     success_only: bool = False
+    push_to_hub: Optional[str] = None  # HuggingFace repo id, e.g. "username/dataset-name"
 
 
 def _find_episodes(input_dir: Path, success_only: bool) -> List[Path]:
@@ -359,6 +360,29 @@ def main(args: Args) -> None:
     logger.info("  State dim: {}", state_dim)
     logger.info("  Action dim: {}", action_dim)
     logger.info("  Cameras: {}", cam_names)
+
+    # Upload to HuggingFace Hub
+    if args.push_to_hub:
+        _push_to_hub(output_dir, args.push_to_hub)
+
+
+def _push_to_hub(dataset_dir: Path, repo_id: str) -> None:
+    """Upload dataset to HuggingFace Hub."""
+    try:
+        from huggingface_hub import HfApi
+    except ImportError:
+        logger.error("huggingface_hub not installed. Run: uv pip install huggingface-hub")
+        raise SystemExit(1) from None
+
+    api = HfApi()
+    logger.info("Uploading to HuggingFace Hub: {}", repo_id)
+    api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
+    api.upload_folder(
+        folder_path=str(dataset_dir),
+        repo_id=repo_id,
+        repo_type="dataset",
+    )
+    logger.info("Uploaded: https://huggingface.co/datasets/{}", repo_id)
 
 
 if __name__ == "__main__":

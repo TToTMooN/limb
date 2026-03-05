@@ -968,7 +968,7 @@ requires-dist = [
     { name = "pyroki", git = "https://github.com/chungmin99/pyroki.git" },
     { name = "pyzed", marker = "extra == 'sensors'", path = "dependencies/pyzed-5.1-cp311-cp311-linux_x86_64.whl" },
     { name = "qpsolvers", extras = ["quadprog"] },
-    { name = "rerun-sdk" },
+    { name = "rerun-sdk", specifier = "==0.30.1" },
     { name = "robot-descriptions" },
     { name = "ruff" },
     { name = "tyro" },

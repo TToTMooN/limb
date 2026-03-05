@@ -27,10 +27,12 @@ Process/thread model during data collection::
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -80,6 +82,15 @@ class DataCollectionSession:
         self._session_start = time.time()
         self._countdown_start: Optional[float] = None
         self._done = False
+
+        # Create session subdirectory: base_dir/task_name_YYYYMMDD_HHMMSS/
+        if self.task_instruction:
+            task_slug = re.sub(r"[^a-z0-9]+", "_", self.task_instruction.lower()).strip("_")[:50]
+        else:
+            task_slug = "session"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_dir = str(Path(self.recorder.base_dir) / f"{task_slug}_{ts}")
+        self.recorder.base_dir = session_dir
 
         logger.info(
             "Data collection session: target={} episodes, task='{}'",
