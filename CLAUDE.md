@@ -63,7 +63,11 @@ limb/
     launch_utils.py       # CAN setup, safe-move helpers
     portal_utils.py       # Portal RPC (@remote decorator)
     depth_utils.py        # Point cloud processing
-scripts/                  # Standalone diagnostic scripts
+scripts/
+  diagnostics/            # Hardware test scripts
+  data/
+    visualize_episode.py  # Rerun viewer for raw episodes
+    convert_to_lerobot.py # Raw → LeRobot v2.1 format (no lerobot dep)
 docs/
   teleop.md               # Detailed teleop docs
   data_collection.md      # Data collection + episode recording docs
@@ -123,9 +127,13 @@ uv run limb/envs/launch.py --config_path configs/yam_pi0_bimanual.yaml
 uv run limb/envs/launch.py --config_path configs/yam_policy_bimanual.yaml
 
 # Diagnostics
-uv run scripts/test_realsense_cameras.py
-uv run scripts/test_gello_input.py
-uv run scripts/test_vr_input.py
+uv run scripts/diagnostics/test_realsense_cameras.py
+uv run scripts/diagnostics/test_gello_input.py
+uv run scripts/diagnostics/test_vr_input.py
+
+# Data tools (requires: uv sync --extra data)
+uv run scripts/data/visualize_episode.py --episode_dir recordings/episode_...
+uv run scripts/data/convert_to_lerobot.py --input_dir recordings/task --output_dir datasets/task
 ```
 
 ---

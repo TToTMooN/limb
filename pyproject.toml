@@ -39,6 +39,8 @@ dependencies = [
     "xdof_sdk",
     "dynamixel-sdk",
     "evdev",
+    "pyarrow",
+    "rerun-sdk",
 ]
 
 [project.optional-dependencies]

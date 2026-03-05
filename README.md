@@ -80,12 +80,19 @@ uv run limb/envs/launch.py --config_path configs/yam_pi0_bimanual.yaml      # Op
 uv run limb/envs/launch.py --config_path configs/yam_policy_bimanual.yaml    # Generic WebSocket
 ```
 
+### Data Tools
+
+```bash
+uv run scripts/data/visualize_episode.py --episode_dir recordings/episode_... # Rerun viewer
+uv run scripts/data/convert_to_lerobot.py --input_dir recordings/ --output_dir datasets/  # LeRobot format
+```
+
 ### Diagnostics
 
 ```bash
-uv run scripts/test_realsense_cameras.py
-uv run scripts/test_gello_input.py
-uv run scripts/test_vr_input.py
+uv run scripts/diagnostics/test_realsense_cameras.py
+uv run scripts/diagnostics/test_gello_input.py
+uv run scripts/diagnostics/test_vr_input.py
 ```
 
 ---
