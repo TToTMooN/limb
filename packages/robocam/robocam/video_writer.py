@@ -97,6 +97,7 @@ class AsyncVideoWriter:
     _queue: queue.Queue = field(init=False, repr=False)
     _frame_count: int = field(init=False, repr=False, default=0)
     _started: bool = field(init=False, repr=False, default=False)
+    _failed: bool = field(init=False, repr=False, default=False)
 
     def __post_init__(self) -> None:
         self._queue = queue.Queue(maxsize=self.queue_size)
@@ -171,6 +172,7 @@ class AsyncVideoWriter:
                     self._proc.stdin.write(item)
                 except BrokenPipeError:
                     logger.error("ffmpeg pipe broken — encoder may have crashed")
+                    self._failed = True
                     break
         finally:
             try:
@@ -188,6 +190,8 @@ class AsyncVideoWriter:
         """
         if not self._started:
             raise RuntimeError("Call start() before write()")
+        if self._failed:
+            return
         self._queue.put(frame.tobytes())
         self._frame_count += 1
 
@@ -196,9 +200,10 @@ class AsyncVideoWriter:
         if not self._started:
             return
 
-        self._queue.put(_SENTINEL)
+        if not self._failed:
+            self._queue.put(_SENTINEL)
         if self._thread is not None:
-            self._thread.join(timeout=30)
+            self._thread.join(timeout=10)
 
         if self._proc is not None:
             self._proc.wait(timeout=30)

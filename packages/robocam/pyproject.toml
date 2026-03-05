@@ -17,7 +17,7 @@ realsense = ["pyrealsense2"]
 zed = ["pyzed"]
 opencv = ["opencv-contrib-python"]
 image = ["opencv-contrib-python", "Pillow"]
-all = ["pyrealsense2", "opencv-contrib-python", "Pillow"]
+all = ["pyrealsense2", "pyzed", "opencv-contrib-python", "Pillow"]
 
 [tool.flit.module]
 name = "robocam"
