@@ -927,8 +927,8 @@ requires-dist = [
     { name = "pyarrow" },
     { name = "pyrealsense2" },
     { name = "pyroki", git = "https://github.com/chungmin99/pyroki.git" },
-    { name = "pyzed", marker = "extra == 'all'", path = "dependencies/pyzed-5.2-cp311-cp311-linux_x86_64.whl" },
-    { name = "pyzed", marker = "extra == 'sensors'", path = "dependencies/pyzed-5.2-cp311-cp311-linux_x86_64.whl" },
+    { name = "pyzed", marker = "extra == 'all'", url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" },
+    { name = "pyzed", marker = "extra == 'sensors'", url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" },
     { name = "qpsolvers", extras = ["quadprog"] },
     { name = "rerun-sdk", specifier = "==0.30.1" },
     { name = "robocam", git = "https://github.com/TToTMooN/robocam.git" },
@@ -1674,13 +1674,13 @@ wheels = [
 [[package]]
 name = "pyzed"
 version = "5.2"
-source = { path = "dependencies/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
+source = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
 dependencies = [
     { name = "cython" },
     { name = "numpy" },
 ]
 wheels = [
-    { filename = "pyzed-5.2-cp311-cp311-linux_x86_64.whl", hash = "sha256:c236065cc97f7235fb2e73586c0a60b700bb7361ed73252330f8f5a87addc71a" },
+    { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl", hash = "sha256:c236065cc97f7235fb2e73586c0a60b700bb7361ed73252330f8f5a87addc71a" },
 ]
 
 [package.metadata]

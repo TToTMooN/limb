@@ -56,7 +56,7 @@ all = [
 [tool.uv.sources]
 i2rt = { path = "dependencies/i2rt", editable = true }
 robocam = { git = "https://github.com/TToTMooN/robocam.git" }
-pyzed = { path = "dependencies/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
+pyzed = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
 
 [tool.uv]
 
