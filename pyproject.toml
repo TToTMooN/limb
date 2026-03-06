@@ -47,13 +47,16 @@ dependencies = [
 [project.optional-dependencies]
 sensors = [
     "robocam[zed]",
+    "pyzed",
 ]
 all = [
     "robocam[zed]",
+    "pyzed",
 ]
 [tool.uv.sources]
 i2rt = { path = "dependencies/i2rt", editable = true }
-robocam = { path = "packages/robocam", editable = true }
+robocam = { git = "https://github.com/TToTMooN/robocam.git" }
+pyzed = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
 
 [tool.uv]
 
