@@ -2,6 +2,7 @@ import time
 from typing import Any, Dict, Optional, Union
 
 import dm_env
+from loguru import logger
 
 from limb.core.observation import (
     Observation,
@@ -133,7 +134,7 @@ class RobotEnv(dm_env.Environment):
     def close(self) -> None:
         assert self._camera_dict is not None, "Camera dictionary is not set."
         for camera_name, client in self._camera_dict.items():
-            print(f"closing camera {camera_name}")
+            logger.debug(f"Closing camera {camera_name}")
             client.close()  # type: ignore
 
-        print("Environment closed.")
+        logger.debug("Environment closed.")

@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,7 +39,8 @@ from loguru import logger
 
 from limb.core.observation import Observation
 from limb.recording.episode_recorder import EpisodeRecorder
-from limb.recording.trigger import KeyboardTrigger, TriggerSignal
+from limb.recording.trigger import CompositeTrigger, FootPedalTrigger, KeyboardTrigger, TriggerSignal, VRButtonTrigger
+from limb.tui import SessionState
 
 
 @dataclass
@@ -76,11 +76,14 @@ class DataCollectionSession:
     task_instruction: str = ""
     countdown_s: float = 3.0
 
+    display: object = None  # StatusDisplay, set programmatically (not from config)
+
     def __post_init__(self) -> None:
         self._completed: List[Dict[str, Any]] = []
         self._discarded: int = 0
         self._session_start = time.time()
         self._countdown_start: Optional[float] = None
+        self._recording_start: Optional[float] = None
         self._done = False
 
         # Create session subdirectory: base_dir/task_name_YYYYMMDD_HHMMSS/
@@ -97,7 +100,8 @@ class DataCollectionSession:
             self.num_episodes if self.num_episodes > 0 else "unlimited",
             self.task_instruction or "(none)",
         )
-        logger.info("Controls: SPACE/ENTER=toggle recording, D=discard, S=mark success, Q=quit")
+        self._controls_hint = self._build_controls_hint()
+        logger.info("Controls: {}", self._controls_hint)
 
     @property
     def is_done(self) -> bool:
@@ -121,12 +125,11 @@ class DataCollectionSession:
             elapsed = time.time() - self._countdown_start
             remaining = self.countdown_s - elapsed
             if remaining > 0:
-                sys.stderr.write(f"\r  Recording starts in {remaining:.0f}s...  ")
-                sys.stderr.flush()
+                self._push_tui_state(countdown_remaining=remaining)
                 return True
             # Countdown finished — start recording
-            sys.stderr.write("\r" + " " * 40 + "\r")
             self._countdown_start = None
+            self._recording_start = time.time()
             metadata = {"task_instruction": self.task_instruction}
             self.recorder.start_episode(metadata=metadata)
             logger.info("Recording started (episode {})", self.episodes_completed + 1)
@@ -163,6 +166,8 @@ class DataCollectionSession:
         if self.recorder.is_recording:
             self.recorder.record(obs, action)
 
+        self._push_tui_state()
+
         # Check if target reached
         if self.num_episodes > 0 and self.episodes_completed >= self.num_episodes:
             self._done = True
@@ -176,6 +181,7 @@ class DataCollectionSession:
             logger.info("Get ready... recording in {:.0f}s", self.countdown_s)
             self._countdown_start = time.time()
         else:
+            self._recording_start = time.time()
             metadata = {"task_instruction": self.task_instruction}
             self.recorder.start_episode(metadata=metadata)
             logger.info("Recording started (episode {})", self.episodes_completed + 1)
@@ -205,6 +211,44 @@ class DataCollectionSession:
             self.episodes_completed,
             target,
         )
+
+    def _build_controls_hint(self) -> str:
+        """Build a controls hint string based on the trigger type."""
+        trigger = self.trigger
+        # Unwrap CompositeTrigger to find the primary trigger
+        if isinstance(trigger, CompositeTrigger):
+            for src in trigger.sources:
+                if isinstance(src, (FootPedalTrigger, VRButtonTrigger)):
+                    trigger = src
+                    break
+
+        if isinstance(trigger, FootPedalTrigger):
+            left_sig = trigger.left_signal.lower().replace("_", "/")
+            right_sig = trigger.right_signal.lower().replace("_", "/")
+            return f"[left pedal] {left_sig}  [right pedal] {right_sig}  [S] save  [Q] quit"
+        if isinstance(trigger, VRButtonTrigger):
+            return "[B] toggle  [Y] discard"
+        return "[SPACE] toggle  [D] discard  [S] save  [Q] quit"
+
+    def _push_tui_state(self, countdown_remaining: float = 0.0) -> None:
+        """Push current session state to the TUI display (if attached)."""
+        if self.display is None:
+            return
+        duration = 0.0
+        if self.recorder.is_recording and self._recording_start is not None:
+            duration = time.time() - self._recording_start
+        state = SessionState(
+            recording=self.recorder.is_recording,
+            episode_current=self.episodes_completed + (1 if self.recorder.is_recording else 0),
+            episode_total=self.num_episodes,
+            episode_duration_s=duration,
+            countdown_remaining=countdown_remaining,
+            episodes_successful=self.episodes_successful,
+            episodes_discarded=self._discarded,
+            task_instruction=self.task_instruction,
+            controls_hint=self._controls_hint,
+        )
+        self.display.update_session(state)
 
     def _discard_episode(self) -> None:
         """Stop recording and delete the episode data."""

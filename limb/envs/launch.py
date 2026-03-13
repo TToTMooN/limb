@@ -4,7 +4,6 @@ Main launch script for YAM realtime robot control environment.
 
 import os
 import signal
-import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,6 +23,7 @@ from limb.recording.session import DataCollectionSession
 from limb.robots.robot import Robot
 from limb.robots.utils import Rate, Timeout
 from limb.sensors.cameras.camera import CameraDriver
+from limb.tui import StatusDisplay
 from limb.utils.launch_utils import (
     cleanup_processes,
     initialize_agent,
@@ -258,8 +258,13 @@ def main(args: Args) -> None:
             robots = main_config.robots
             agent = instantiate(agent_cfg)
 
+            display = StatusDisplay()
+            display.start()
             logger.info("Starting sim control loop at %.1f Hz...", main_config.hz)
-            _run_sim_control_loop(robots, agent, main_config)
+            try:
+                _run_sim_control_loop(robots, agent, main_config, display=display)
+            finally:
+                display.stop()
             return
 
         # ----- Real hardware mode (original path) ----- #
@@ -337,8 +342,18 @@ def main(args: Args) -> None:
             recorder = instantiate(main_config.recording)
             logger.info("EpisodeRecorder configured (base_dir={})", recorder.base_dir)
 
+        display = StatusDisplay()
+        display.start()
+        if session is not None:
+            session.display = display
+
         logger.info("Starting control loop...")
-        _run_control_loop(env, agent, main_config, monitor=monitor, recorder=recorder, session=session)
+        try:
+            _run_control_loop(
+                env, agent, main_config, monitor=monitor, recorder=recorder, session=session, display=display
+            )
+        finally:
+            display.stop()
 
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received, initiating safe shutdown...")
@@ -384,6 +399,7 @@ def _run_sim_control_loop(
     robots: Dict[str, Robot],
     agent: Agent,
     config: LaunchConfig,
+    display: Optional[StatusDisplay] = None,
 ) -> None:
     """Simplified control loop for sim mode (no portal, no cameras).
 
@@ -426,17 +442,15 @@ def _run_sim_control_loop(
             elapsed_time = time.time() - start_time
             if elapsed_time >= 1:
                 hz = loop_count / elapsed_time
-                sys.stderr.write(f"\r  Sim control loop: {hz:.1f} Hz | step {steps}  ")
-                sys.stderr.flush()
+                if display is not None:
+                    display.update_loop(hz, steps)
                 start_time = time.time()
                 loop_count = 0
 
             if config.max_steps is not None and steps >= config.max_steps:
-                sys.stderr.write("\n")
                 logger.info(f"Reached max steps ({config.max_steps}), stopping...")
                 break
     except KeyboardInterrupt:
-        sys.stderr.write("\n")
         logger.info("Interrupted.")
     finally:
         if hasattr(agent, "close"):
@@ -453,6 +467,7 @@ def _run_control_loop(
     monitor: Optional[ViserMonitor] = None,
     recorder: Optional[EpisodeRecorder] = None,
     session: Optional[DataCollectionSession] = None,
+    display: Optional[StatusDisplay] = None,
 ) -> None:
     """Run the main control loop.  Exits when _shutdown_requested is set by SIGINT."""
     steps = 0
@@ -485,17 +500,15 @@ def _run_control_loop(
         elapsed_time = time.time() - start_time
         if elapsed_time >= 1:
             hz = loop_count / elapsed_time
-            sys.stderr.write(f"\r  Control loop: {hz:.1f} Hz | step {steps}  ")
-            sys.stderr.flush()
+            if display is not None:
+                display.update_loop(hz, steps)
             start_time = time.time()
             loop_count = 0
 
         if config.max_steps is not None and steps >= config.max_steps:
-            sys.stderr.write("\n")
             logger.info(f"Reached max steps ({config.max_steps}), stopping...")
             break
 
-    sys.stderr.write("\n")
     if _shutdown_requested:
         logger.info("Shutdown flag detected, exiting control loop.")
 

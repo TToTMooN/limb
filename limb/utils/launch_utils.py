@@ -3,6 +3,7 @@ Utilities for launching and configuring robots, sensors, and agents.
 """
 
 import logging
+import multiprocessing
 import subprocess
 import sys
 import time
@@ -21,7 +22,6 @@ from limb.utils.portal_utils import (
     RemoteServer,
     launch_remote_get_local_handler,
 )
-import multiprocessing
 
 
 class _InterceptHandler(logging.Handler):
@@ -64,9 +64,14 @@ def setup_logging(level: str = "INFO") -> None:
         format="<level>{time:HH:mm:ss.SSS} | {level:<7} | {file}:{line} - {message}</level>",
         level=level.upper(),
         colorize=True,
+        filter={"robocam.video_writer": "WARNING"},
     )
 
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+
+    # Suppress noisy third-party stdlib loggers
+    for name in ("portal", "portal.client", "portal.server", "viser", "httpcore", "uvicorn"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def setup_can_interfaces():

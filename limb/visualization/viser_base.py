@@ -16,12 +16,13 @@ import viser
 import viser.extras
 import viser.transforms as vtf
 import yourdfpy
+from loguru import logger
 
 try:
     from robot_descriptions.loaders.yourdfpy import load_robot_description as load_urdf_robot_description
 except ImportError as e:
-    print(f"Error importing robot_descriptions: {e}")
-    print("Please run: pip install git+https://github.com/uynitsuj/robot_descriptions.py.git")
+    logger.error(f"Error importing robot_descriptions: {e}")
+    logger.error("Please run: pip install git+https://github.com/uynitsuj/robot_descriptions.py.git")
     exit()
 
 _AUTO_VISER = object()

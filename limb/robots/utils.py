@@ -75,10 +75,7 @@ class Rate:
             return
         overrun = time.time() - (self.last + self.dt)
         if overrun > self.warn_tolerance and not self._first:
-            logger.warning(
-                f"Behind schedule {self.rate_name} by {overrun:.4f}s "
-                f"(tolerance {self.warn_tolerance}s)"
-            )
+            logger.debug(f"Behind schedule {self.rate_name} by {overrun:.4f}s (tolerance {self.warn_tolerance}s)")
         else:
             needed_sleep = max(0, self.last + self.dt - time.time() - 0.0001)
             time.sleep(needed_sleep)

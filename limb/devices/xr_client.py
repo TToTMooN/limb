@@ -5,16 +5,13 @@ Requires XRoboToolkit PC Service to be running.
 Install the SDK with: bash scripts/install_xrobotoolkit_sdk.sh
 """
 
-from typing import Optional
-
 import numpy as np
+from loguru import logger
 
 try:
     import xrobotoolkit_sdk as xrt
 except ImportError:
-    raise ImportError(
-        "xrobotoolkit_sdk not installed. Run: bash scripts/install_xrobotoolkit_sdk.sh"
-    )
+    raise ImportError("xrobotoolkit_sdk not installed. Run: bash scripts/install_xrobotoolkit_sdk.sh")
 
 
 class XrClient:
@@ -22,7 +19,7 @@ class XrClient:
 
     def __init__(self) -> None:
         xrt.init()
-        print("XRoboToolkit SDK initialized.")
+        logger.debug("XRoboToolkit SDK initialized.")
 
     def get_pose(self, name: str) -> np.ndarray:
         """Get device pose as [x, y, z, qx, qy, qz, qw].
