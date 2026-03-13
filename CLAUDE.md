@@ -120,6 +120,7 @@ uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml
 
 # Data collection (overlay configs — combine with any teleop config)
 uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
+uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection_pedal.yaml  # foot pedal
 uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
 
 # Policy deployment

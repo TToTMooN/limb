@@ -9,8 +9,11 @@ limb records raw episode data during teleoperation. Post-processing to HDF5, LeR
 Collection configs are overlays — combine with any teleop config:
 
 ```bash
-# GELLO (network) + keyboard/foot pedal triggers
+# GELLO (network) + keyboard triggers
 uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
+
+# GELLO (network) + foot pedal (iKKEGOL double pedal) + keyboard fallback
+uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection_pedal.yaml
 
 # VR + VR button triggers
 uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
@@ -55,7 +58,14 @@ collection:
 | D              | DISCARD    | Discard current episode (deletes data) |
 | Q / Escape     | QUIT       | End collection session          |
 
-USB foot pedals that present as keyboard HID work out of the box — most send Enter or Space by default.
+**Foot pedal** (`FootPedalTrigger`) — for iKKEGOL / PCsensor double USB pedals:
+
+| Pedal | Signal     | Action                  |
+| ----- | ---------- | ----------------------- |
+| Left  | START_STOP | Toggle recording on/off |
+| Right | DISCARD    | Discard current episode |
+
+Reads via evdev with exclusive grab (key events won't leak to the desktop). Auto-detects the pedal by USB vendor:product ID. Key mapping is configurable via `left_key` / `right_key` in YAML (default: `KEY_A` / `KEY_B`).
 
 **VR buttons** (`VRButtonTrigger`) — for bimanual VR teleop where both hands are occupied:
 
@@ -69,6 +79,14 @@ Note: A/X are already used for arm reset in VR teleop.
 **Composite** (`CompositeTrigger`) — combines multiple trigger sources (first signal wins):
 
 ```yaml
+# Foot pedal + keyboard fallback
+trigger:
+  _target_: limb.recording.trigger.CompositeTrigger
+  sources:
+    - _target_: limb.recording.trigger.FootPedalTrigger
+    - _target_: limb.recording.trigger.KeyboardTrigger
+
+# VR buttons + keyboard fallback
 trigger:
   _target_: limb.recording.trigger.CompositeTrigger
   sources:
@@ -80,7 +98,7 @@ trigger:
 ### Session Workflow
 
 1. Launch with a collection config
-2. Press **Space/Enter** (or foot pedal) to start recording
+2. Press **Space/Enter** (keyboard) or **left pedal** (foot pedal) to start recording
 3. Countdown (configurable, default 3s) then recording begins
 4. Perform the task via teleop
 5. Press **S** to mark success, **Space** to stop (neutral), or **D** to discard

@@ -6,7 +6,7 @@ hands are occupied.
 
 Supported backends:
   - Keyboard: spacebar/enter/escape (when a helper or one hand is free)
-  - Foot pedal: USB HID pedals that present as keyboard (most practical)
+  - Foot pedal: USB HID pedals via evdev with exclusive grab (iKKEGOL/PCsensor)
   - VR buttons: B/Y buttons on Pico controllers (during VR teleop)
 
 All backends implement the same TriggerSource protocol and are polled
@@ -144,6 +144,123 @@ class VRButtonTrigger:
 
     def close(self) -> None:
         pass
+
+
+@dataclass
+class FootPedalTrigger:
+    """Read signals from a USB foot pedal via evdev (grabs device exclusively).
+
+    Designed for iKKEGOL / PCsensor double foot pedals. The pedal must be
+    programmed to send keyboard keys (factory default is typically A and B).
+
+    Default key mapping (configurable):
+      Left pedal  (KEY_A) →  START_STOP (toggle recording)
+      Right pedal (KEY_B) →  DISCARD (discard current episode)
+
+    The device is identified by matching vendor:product ID or /dev/input/by-id
+    path. It is grabbed exclusively so key events don't leak to the desktop.
+
+    Parameters
+    ----------
+    device_path : Path to the evdev device, or "auto" to find by vendor/product.
+    vendor_id : USB vendor ID (hex). Default 0x3553 = PCsensor.
+    product_id : USB product ID (hex). Default 0xb001 = FootSwitch.
+    left_key : evdev key name for left pedal.
+    right_key : evdev key name for right pedal.
+    left_signal : Signal to emit for left pedal.
+    right_signal : Signal to emit for right pedal.
+    """
+
+    device_path: str = "auto"
+    vendor_id: int = 0x3553
+    product_id: int = 0xB001
+    left_key: str = "KEY_A"
+    right_key: str = "KEY_B"
+    left_signal: str = "START_STOP"
+    right_signal: str = "DISCARD"
+
+    def __post_init__(self) -> None:
+        import evdev as _evdev
+        from loguru import logger
+
+        self._device: _evdev.InputDevice | None = None
+
+        if self.device_path == "auto":
+            self._device = self._find_device()
+        else:
+            self._device = _evdev.InputDevice(self.device_path)
+
+        if self._device is None:
+            logger.warning(
+                f"Foot pedal not found (vendor={self.vendor_id:#06x}, product={self.product_id:#06x}). "
+                "FootPedalTrigger will be inactive."
+            )
+            return
+
+        self._device.grab()
+        logger.info(f"Foot pedal grabbed: {self._device.name} ({self._device.path})")
+
+        self._left_code = _evdev.ecodes.ecodes[self.left_key]
+        self._right_code = _evdev.ecodes.ecodes[self.right_key]
+        self._left_signal = TriggerSignal(self.left_signal.lower())
+        self._right_signal = TriggerSignal(self.right_signal.lower())
+
+    def _find_device(self) -> object | None:
+        import evdev as _evdev
+
+        candidates = []
+        for path in _evdev.list_devices():
+            try:
+                dev = _evdev.InputDevice(path)
+                info = dev.info
+                if info.vendor == self.vendor_id and info.product == self.product_id:
+                    if _evdev.ecodes.EV_KEY in dev.capabilities():
+                        candidates.append(dev)
+                    else:
+                        dev.close()
+                else:
+                    dev.close()
+            except (OSError, PermissionError):
+                continue
+        if not candidates:
+            return None
+        # Prefer the keyboard interface (name contains "Keyboard") over mouse
+        for dev in candidates:
+            if "keyboard" in dev.name.lower():
+                for other in candidates:
+                    if other is not dev:
+                        other.close()
+                return dev
+        # Fallback to first candidate
+        for dev in candidates[1:]:
+            dev.close()
+        return candidates[0]
+
+    def get_signal(self) -> Optional[TriggerSignal]:
+        if self._device is None:
+            return None
+        import select as _select
+
+        r, _, _ = _select.select([self._device], [], [], 0)
+        if not r:
+            return None
+        signal = None
+        for event in self._device.read():
+            if event.type == 1 and event.value == 1:  # EV_KEY, key down
+                if event.code == self._left_code:
+                    signal = self._left_signal
+                elif event.code == self._right_code:
+                    signal = self._right_signal
+        return signal
+
+    def close(self) -> None:
+        if self._device is not None:
+            try:
+                self._device.ungrab()
+            except OSError:
+                pass
+            self._device.close()
+            self._device = None
 
 
 @dataclass
