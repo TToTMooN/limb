@@ -33,7 +33,12 @@ from limb.utils.launch_utils import (
     setup_can_interfaces,
     setup_logging,
 )
-from limb.visualization.viser_monitor import ViserMonitor
+from limb.visualization.app import ViserApp
+from limb.visualization.panels.camera_panel import CameraPanel
+from limb.visualization.panels.loop_status_panel import LoopStatusPanel
+from limb.visualization.panels.recording_panel import RecordingPanel
+from limb.visualization.panels.session_panel import SessionPanel
+from limb.visualization.panels.urdf_panel import URDFPanel
 
 SAFE_MOVE_DURATION_S = 1.0
 IK_WARMUP_TIMEOUT_S = 15.0
@@ -278,23 +283,32 @@ def main(args: Args) -> None:
 
         agent = initialize_agent(agent_cfg, server_processes)
 
-        # Create a standalone ViserMonitor for agents that don't have their own
-        # (e.g. GELLO, VR).  YamViserAgent already embeds a ViserMonitor.
-        monitor: Optional[ViserMonitor] = None
+        # Build viser app with panels for agents that don't have their own
+        # viser server (GELLO, VR). YamViserAgent has its own viser in-process.
+        viser_app: Optional[ViserApp] = None
         agent_target = agent_cfg.get("_target_", "")
-        if main_config.enable_monitor and "YamViserAgent" not in agent_target:
+        agent_has_viser = "YamViserAgent" in agent_target
+        has_collection = main_config.collection is not None
+
+        if main_config.enable_monitor and not agent_has_viser:
             is_bimanual = len(robots) > 1
             right_extrinsic = (
                 main_config.station_metadata.get("extrinsics", {}).get("right_arm_extrinsic")
                 if main_config.station_metadata
                 else None
             )
-            monitor = ViserMonitor(
-                enable_urdf=True,
-                bimanual=is_bimanual,
-                right_arm_extrinsic=right_extrinsic,
-            )
-            logger.info("ViserMonitor started (standalone) for camera feeds + recording + URDF")
+            viser_app = ViserApp()
+            camera_panel = CameraPanel()
+            viser_app.add_panel("cameras", camera_panel)
+            viser_app.add_panel("urdf", URDFPanel(bimanual=is_bimanual, right_arm_extrinsic=right_extrinsic))
+            logger.info("ViserApp started with camera + URDF panels")
+        elif main_config.enable_monitor and agent_has_viser and has_collection:
+            # YamViserAgent + data collection: create a lightweight viser app
+            # (no URDF — agent has its own). Session panel needs a server.
+            viser_app = ViserApp()
+            camera_panel = CameraPanel()
+            viser_app.add_panel("cameras", camera_panel)
+            logger.info("ViserApp started (lightweight) for session panel")
 
         logger.info("Creating robot environment...")
         frequency = main_config.hz
@@ -342,18 +356,37 @@ def main(args: Args) -> None:
             recorder = instantiate(main_config.recording)
             logger.info("EpisodeRecorder configured (base_dir={})", recorder.base_dir)
 
-        display = StatusDisplay()
-        display.start()
-        if session is not None:
-            session.display = display
+        # Wire up display: viser panels when app exists, Rich TUI otherwise.
+        display: Any = None
+        if viser_app is not None and session is not None:
+            from limb.recording.trigger import CompositeTrigger
+
+            session_panel = SessionPanel()
+            viser_app.add_panel("session", session_panel)
+            session_panel.start()
+            session.trigger = CompositeTrigger(sources=[session_panel, session.trigger])
+            session.display = session_panel
+            display = session_panel
+        elif viser_app is not None:
+            # No session — add recording button + loop status
+            viser_app.add_panel("recording", RecordingPanel())
+            loop_panel = LoopStatusPanel()
+            viser_app.add_panel("status", loop_panel)
+            display = loop_panel
+        else:
+            display = StatusDisplay()
+            display.start()
+            if session is not None:
+                session.display = display
 
         logger.info("Starting control loop...")
         try:
             _run_control_loop(
-                env, agent, main_config, monitor=monitor, recorder=recorder, session=session, display=display
+                env, agent, main_config, viser_app=viser_app, recorder=recorder, session=session, display=display
             )
         finally:
-            display.stop()
+            if hasattr(display, "stop"):
+                display.stop()
 
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received, initiating safe shutdown...")
@@ -385,8 +418,8 @@ def main(args: Args) -> None:
             session.close()
         elif "recorder" in locals() and recorder is not None:
             recorder.close()
-        if "monitor" in locals() and monitor is not None:
-            monitor.close()
+        if "viser_app" in locals() and viser_app is not None:
+            viser_app.close()
         if "env" in locals():
             env.close()
         if "agent" in locals():
@@ -464,10 +497,10 @@ def _run_control_loop(
     env: RobotEnv,
     agent: Agent,
     config: LaunchConfig,
-    monitor: Optional[ViserMonitor] = None,
+    viser_app: Optional[ViserApp] = None,
     recorder: Optional[EpisodeRecorder] = None,
     session: Optional[DataCollectionSession] = None,
-    display: Optional[StatusDisplay] = None,
+    display: Any = None,
 ) -> None:
     """Run the main control loop.  Exits when _shutdown_requested is set by SIGINT."""
     steps = 0
@@ -491,8 +524,8 @@ def _run_control_loop(
         with Timeout(1, "Env step", "warning"):
             obs = env.step(action)
 
-        if monitor is not None:
-            monitor.update(obs)
+        if viser_app is not None:
+            viser_app.update(obs)
 
         steps += 1
         loop_count += 1
