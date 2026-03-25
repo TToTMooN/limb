@@ -94,7 +94,10 @@ class EpisodeRecorder:
 
         An episode is considered incomplete if it has a RECORDING_IN_PROGRESS
         marker but no metadata.json (meaning it was interrupted before saving).
-        Inspired by Raiden's automatic override of incomplete recordings.
+
+        Safety: the marker file contains the PID that created it. We only
+        delete an episode if the owning process is no longer running, to
+        avoid removing another process's active recording.
         """
         import shutil
 
@@ -106,11 +109,27 @@ class EpisodeRecorder:
             marker = ep_dir / "RECORDING_IN_PROGRESS"
             metadata = ep_dir / "metadata.json"
             if marker.exists() and not metadata.exists():
+                # Check if the owning process is still alive
+                if self._is_marker_owner_alive(marker):
+                    logger.debug("Skipping active recording (owner alive): {}", ep_dir.name)
+                    continue
                 logger.warning("Removing incomplete episode: {}", ep_dir.name)
                 shutil.rmtree(ep_dir, ignore_errors=True)
             elif marker.exists() and metadata.exists():
                 # Recording finished but marker wasn't cleaned up (crash during save)
                 marker.unlink(missing_ok=True)
+
+    @staticmethod
+    def _is_marker_owner_alive(marker: Path) -> bool:
+        """Check if the process that wrote the marker is still running."""
+        import os
+
+        try:
+            pid = int(marker.read_text().strip())
+            os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
+            return True
+        except (ValueError, OSError, ProcessLookupError):
+            return False
 
     @property
     def is_recording(self) -> bool:
@@ -139,8 +158,10 @@ class EpisodeRecorder:
             if self.ee_frame_names is not None:
                 self._metadata["ee_frame_names"] = self.ee_frame_names
 
-            # Mark episode as in-progress (removed on successful save)
-            (self._episode_dir / "RECORDING_IN_PROGRESS").touch()
+            # Mark episode as in-progress with our PID (removed on successful save)
+            import os
+
+            (self._episode_dir / "RECORDING_IN_PROGRESS").write_text(str(os.getpid()))
 
             self._recording = True
             self._episode_count += 1

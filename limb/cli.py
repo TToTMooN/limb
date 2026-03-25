@@ -1,14 +1,15 @@
 """Unified CLI entry point for limb.
 
-Inspired by Raiden's `rd` command, this provides a single `limb` command
-with subcommands for all common operations:
+Provides a single `limb` command with subcommands for all common operations:
 
-    limb teleop    — Launch teleoperation
-    limb record    — Launch data collection session
-    limb devices   — Discover connected hardware
-    limb replay    — Replay a recorded episode on hardware
-    limb convert   — Convert raw recordings to LeRobot format
-    limb visualize — Visualize a recorded episode with Rerun
+    limb teleop           — Launch teleoperation
+    limb record           — Launch data collection session
+    limb devices          — Discover connected hardware
+    limb replay           — Replay a recorded episode on hardware
+    limb convert-lerobot  — Convert raw recordings to LeRobot format
+    limb convert-webdataset — Convert raw recordings to WebDataset tar shards
+    limb visualize        — Visualize a recorded episode with Rerun
+    limb upload           — Upload dataset to S3/GCS/HuggingFace
 
 Usage:
     uv run limb <command> [options]
@@ -88,7 +89,7 @@ class ReplayCommand:
 
 
 @dataclass
-class ConvertCommand:
+class ConvertLerobotCommand:
     """Convert raw recordings to LeRobot v2.1 dataset format."""
 
     input_dir: str = ""
@@ -100,7 +101,7 @@ class ConvertCommand:
     push_to_hub: Optional[str] = None
 
     def run(self) -> None:
-        from scripts.data.convert_to_lerobot import Args, main
+        from limb.data.convert_lerobot import Args, main
 
         main(
             Args(
@@ -116,15 +117,69 @@ class ConvertCommand:
 
 
 @dataclass
+class ConvertWebdatasetCommand:
+    """Convert raw recordings to WebDataset .tar shards for streaming training."""
+
+    input_dir: str = ""
+    output_dir: str = ""
+    task: Optional[str] = None
+    samples_per_shard: int = 1000
+    image_size: Optional[int] = None
+    jpeg_quality: int = 90
+    fps: int = 30
+    success_only: bool = False
+    camera: Optional[str] = None
+
+    def run(self) -> None:
+        from limb.data.convert_webdataset import Args, main
+
+        main(
+            Args(
+                input_dir=self.input_dir,
+                output_dir=self.output_dir,
+                task=self.task,
+                samples_per_shard=self.samples_per_shard,
+                image_size=self.image_size,
+                jpeg_quality=self.jpeg_quality,
+                fps=self.fps,
+                success_only=self.success_only,
+                camera=self.camera,
+            )
+        )
+
+
+@dataclass
 class VisualizeCommand:
     """Visualize a recorded episode with Rerun."""
 
     episode_dir: str = ""
 
     def run(self) -> None:
-        from scripts.data.visualize_episode import Args, main
+        from limb.data.visualize_episode import Args, main
 
         main(Args(episode_dir=self.episode_dir))
+
+
+@dataclass
+class UploadCommand:
+    """Upload a dataset to cloud storage (S3, GCS, or HuggingFace Hub).
+
+    Target URI format:
+        s3://bucket/prefix     — Amazon S3 (uses AWS SDK credential chain)
+        gs://bucket/prefix     — Google Cloud Storage (uses gcloud credentials)
+        hf://username/repo     — HuggingFace Hub (uses HF_TOKEN or huggingface-cli login)
+
+    Or configure a default in ~/.config/limb/storage.yaml
+    """
+
+    source: str = ""
+    target: Optional[str] = None
+    task: Optional[str] = None
+
+    def run(self) -> None:
+        from limb.data.upload import Args, main
+
+        main(Args(source=self.source, target=self.target, task=self.task))
 
 
 Command = Union[
@@ -132,8 +187,10 @@ Command = Union[
     RecordCommand,
     DevicesCommand,
     ReplayCommand,
-    ConvertCommand,
+    ConvertLerobotCommand,
+    ConvertWebdatasetCommand,
     VisualizeCommand,
+    UploadCommand,
 ]
 
 

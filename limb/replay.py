@@ -110,7 +110,13 @@ def replay_episode(
 
     timestamps = episode_data["timestamps"]
     n_steps = len(timestamps)
+    if n_steps == 0:
+        logger.error("Episode has no timesteps (empty timestamps.npy)")
+        return
     arm_names = sorted(episode_data["arms"].keys())
+    if not arm_names:
+        logger.error("Episode has no arm data")
+        return
     duration = timestamps[-1] - timestamps[0]
 
     logger.info(
