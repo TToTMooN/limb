@@ -69,8 +69,14 @@ class EpisodeRecorder:
         self._writers: Dict[str, AsyncVideoWriter] = {}
         self._cam_timestamps: Dict[str, List[float]] = {}
 
+        # Depth recording (when cameras provide depth data)
+        self._depth_writers: Dict[str, AsyncVideoWriter] = {}
+
         # Metadata
         self._metadata: Dict[str, Any] = {}
+
+        # Clean up any incomplete episodes from previous runs
+        self._cleanup_incomplete_episodes()
 
         if self.auto_start:
             self.start_episode()
@@ -82,6 +88,29 @@ class EpisodeRecorder:
             return 0
         existing = sorted(base.glob("episode_*"))
         return len(existing)
+
+    def _cleanup_incomplete_episodes(self) -> None:
+        """Remove incomplete episodes from previous runs.
+
+        An episode is considered incomplete if it has a RECORDING_IN_PROGRESS
+        marker but no metadata.json (meaning it was interrupted before saving).
+        Inspired by Raiden's automatic override of incomplete recordings.
+        """
+        import shutil
+
+        base = Path(self.base_dir)
+        if not base.exists():
+            return
+
+        for ep_dir in sorted(base.glob("episode_*")):
+            marker = ep_dir / "RECORDING_IN_PROGRESS"
+            metadata = ep_dir / "metadata.json"
+            if marker.exists() and not metadata.exists():
+                logger.warning("Removing incomplete episode: {}", ep_dir.name)
+                shutil.rmtree(ep_dir, ignore_errors=True)
+            elif marker.exists() and metadata.exists():
+                # Recording finished but marker wasn't cleaned up (crash during save)
+                marker.unlink(missing_ok=True)
 
     @property
     def is_recording(self) -> bool:
@@ -103,11 +132,15 @@ class EpisodeRecorder:
             self._actions = {}
             self._writers = {}
             self._cam_timestamps = {}
+            self._depth_writers = {}
             self._metadata = metadata or {}
             self._metadata["start_time"] = time.time()
             self._metadata["start_time_str"] = ts
             if self.ee_frame_names is not None:
                 self._metadata["ee_frame_names"] = self.ee_frame_names
+
+            # Mark episode as in-progress (removed on successful save)
+            (self._episode_dir / "RECORDING_IN_PROGRESS").touch()
 
             self._recording = True
             self._episode_count += 1
@@ -166,6 +199,19 @@ class EpisodeRecorder:
                 self._writers[cam_name].write(cam_obs.rgb)
                 self._cam_timestamps[cam_name].append(cam_obs.timestamp)
 
+                # Record depth as 16-bit grayscale video when available
+                depth = getattr(cam_obs, "depth", None)
+                if depth is not None and cam_name not in self._depth_writers:
+                    h, w = depth.shape[:2]
+                    depth_path = str(self._episode_dir / f"{cam_name}_depth.mp4")
+                    depth_writer = AsyncVideoWriter(
+                        path=depth_path, width=w, height=h, fps=self.recording_fps, pix_fmt="gray16le"
+                    )
+                    depth_writer.start()
+                    self._depth_writers[cam_name] = depth_writer
+                if depth is not None and cam_name in self._depth_writers:
+                    self._depth_writers[cam_name].write(depth)
+
             self._step_idx += 1
 
     def stop_episode(self) -> Optional[Path]:
@@ -183,6 +229,8 @@ class EpisodeRecorder:
 
         # Flush async video writers (waits for ffmpeg to finish)
         for w in self._writers.values():
+            w.stop()
+        for w in self._depth_writers.values():
             w.stop()
 
         # Save timestamps
@@ -217,8 +265,12 @@ class EpisodeRecorder:
         self._metadata["recording_fps"] = self.recording_fps
         self._metadata["cameras"] = list(self._cam_timestamps.keys())
         self._metadata["arms"] = list(self._arm_states.keys())
+        self._metadata["has_depth"] = bool(self._depth_writers)
         with open(str(episode_dir / "metadata.json"), "w") as f:
             json.dump(self._metadata, f, indent=2, default=str)
+
+        # Remove in-progress marker — episode is now complete
+        (episode_dir / "RECORDING_IN_PROGRESS").unlink(missing_ok=True)
 
         logger.info(
             "Episode saved: {} ({} steps, {:.1f}s)",

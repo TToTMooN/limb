@@ -64,6 +64,9 @@ where = ["."]
 include = ["limb*"]
 exclude = ["configs*"]
 
+[project.scripts]
+limb = "limb.cli:cli_main"
+
 [project.urls]
 Repository = "https://github.com/TToTMooN/limb"
 

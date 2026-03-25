@@ -53,11 +53,32 @@ class Args:
 
 
 def _find_episodes(input_dir: Path, success_only: bool) -> List[Path]:
-    """Find episode directories, sorted by name."""
+    """Find episode directories, sorted by name.
+
+    Automatically skips:
+      - Incomplete episodes (have RECORDING_IN_PROGRESS marker)
+      - Episodes without metadata.json (corrupted/interrupted)
+
+    When success_only=True, only includes episodes with a SUCCESS marker.
+    """
     episodes = sorted(p for p in input_dir.iterdir() if p.is_dir() and p.name.startswith("episode_"))
+
+    valid = []
+    for ep in episodes:
+        # Skip incomplete recordings (crashed mid-episode)
+        if (ep / "RECORDING_IN_PROGRESS").exists():
+            logger.warning("Skipping incomplete episode: {}", ep.name)
+            continue
+        # Skip episodes without metadata (corrupted)
+        if not (ep / "metadata.json").exists():
+            logger.warning("Skipping episode without metadata: {}", ep.name)
+            continue
+        valid.append(ep)
+
     if success_only:
-        episodes = [ep for ep in episodes if (ep / "SUCCESS").exists()]
-    return episodes
+        valid = [ep for ep in valid if (ep / "SUCCESS").exists()]
+
+    return valid
 
 
 def _load_episode(episode_dir: Path) -> Dict:
