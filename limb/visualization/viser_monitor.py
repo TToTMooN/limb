@@ -37,25 +37,16 @@ class ViserMonitor:
         self._app = ViserApp(viser_server=viser_server) if viser_server is not None else ViserApp()
         self.viser_server = self._app.server
 
-        self._camera_panel = CameraPanel(image_size=image_size)
-        self._app.add_panel("cameras", self._camera_panel)
+        self._app.add_panel("cameras", CameraPanel(image_size=image_size))
 
         if enable_urdf:
             self._app.add_panel("urdf", URDFPanel(bimanual=bimanual, right_arm_extrinsic=right_arm_extrinsic))
 
-        self._recording_panel = RecordingPanel(
-            recording_fps=recording_fps,
-            get_latest_rgb=self._camera_panel.get_latest_rgb,
-        )
-        self._app.add_panel("recording", self._recording_panel)
+        self._app.add_panel("recording", RecordingPanel(recording_fps=recording_fps))
 
     def update(self, obs: Any) -> None:
-        """Feed a new observation into all panels."""
+        """Feed a new observation — fans out to all panels."""
         self._app.update(obs)
-        # Also feed frames to recording panel
-        rgb = self._camera_panel.get_latest_rgb()
-        if rgb:
-            self._recording_panel.update_frame(rgb)
 
     def close(self) -> None:
         self._app.close()

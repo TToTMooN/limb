@@ -369,11 +369,9 @@ def main(args: Args) -> None:
             display = session_panel
         elif viser_app is not None:
             # No session — add recording button + loop status
-            recording_panel = RecordingPanel(get_latest_rgb=camera_panel.get_latest_rgb)
-            viser_app.add_panel("recording", recording_panel)
+            viser_app.add_panel("recording", RecordingPanel())
             loop_panel = LoopStatusPanel()
             viser_app.add_panel("status", loop_panel)
-            loop_panel.attach(viser_app.server)
             display = loop_panel
         else:
             display = StatusDisplay()

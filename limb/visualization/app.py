@@ -15,9 +15,33 @@ folder and/or scene elements. Panels are added declaratively::
     # On shutdown:
     app.close()
 
-This replaces the monolithic ViserMonitor with a composable panel system
-that makes it easy to add new visualizations (3D points, policy status,
-intervention controls) without modifying existing code.
+Threading model
+---------------
+- **Main thread** calls ``update(obs)`` synchronously from the control loop
+  (~100 Hz). All panel ``update()`` methods run on the main thread.
+- **Viser server thread** (internal to viser) handles WebSocket I/O and fires
+  ``on_click`` / ``on_update`` GUI callbacks on its own thread.  Panels that
+  receive callbacks (SessionPanel, RecordingPanel) must use thread-safe
+  structures (``deque``, ``threading.Lock``) to bridge to the main thread.
+- **Portal subprocess** (YamViserAgent) has its own ViserServer + panels in a
+  separate process. The main-process ViserApp is independent.
+
+Data flow::
+
+    Main thread (100 Hz control loop)
+    │
+    ├─ agent.act(obs)          Portal RPC
+    ├─ session.step(obs, act)  trigger poll (deque.popleft) + recording
+    ├─ env.step(action)        Portal RPC
+    └─ viser_app.update(obs)   sequential fan-out to panels:
+         ├─ CameraPanel.update(obs)      extract RGB, update thumbnails
+         ├─ URDFPanel.update(obs)        update joint visualization
+         └─ RecordingPanel.update(obs)   write frames if recording
+
+    Viser server thread (async WebSocket)
+    │
+    ├─ SessionPanel on_click   → deque.append(signal)    [thread-safe]
+    └─ RecordingPanel on_click → Lock + toggle recording [thread-safe]
 """
 
 from __future__ import annotations
@@ -47,7 +71,11 @@ class ViserPanel(Protocol):
 
 @runtime_checkable
 class ObservablePanel(ViserPanel, Protocol):
-    """A panel that receives observations from the control loop."""
+    """A panel that receives observations from the control loop.
+
+    ``update()`` is always called from the main thread, synchronously,
+    in panel registration order.
+    """
 
     def update(self, obs: Any) -> None:
         """Process a new observation (update images, URDF, etc.)."""
@@ -76,6 +104,9 @@ class ViserApp:
             self.server = viser.ViserServer(port=port)
         else:
             self.server = viser.ViserServer()
+        # Ordered dict (Python 3.7+) — panels update in registration order.
+        # Register CameraPanel before RecordingPanel so RGB is extracted
+        # before frames are written.
         self._panels: Dict[str, ViserPanel] = {}
 
     def add_panel(self, name: str, panel: ViserPanel) -> None:
@@ -91,7 +122,12 @@ class ViserApp:
         return self._panels.get(name)
 
     def update(self, obs: Any) -> None:
-        """Fan out an observation to all ObservablePanel instances."""
+        """Fan out an observation to all ObservablePanel instances.
+
+        Called from the main thread only. Panels update in registration
+        order, which matters for data dependencies (e.g. CameraPanel
+        extracts RGB before RecordingPanel writes frames).
+        """
         for panel in self._panels.values():
             if isinstance(panel, ObservablePanel):
                 panel.update(obs)
