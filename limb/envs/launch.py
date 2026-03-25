@@ -280,16 +280,9 @@ def main(args: Args) -> None:
 
         # Create a standalone ViserMonitor for agents that don't have their own
         # (e.g. GELLO, VR).  YamViserAgent already embeds a ViserMonitor.
-        # Also create one for YamViserAgent when data collection is active,
-        # since the agent's viser server runs in a Portal subprocess and we
-        # can't attach GUI elements to it from the main process.
         monitor: Optional[ViserMonitor] = None
         agent_target = agent_cfg.get("_target_", "")
-        has_collection = main_config.collection is not None
-        needs_standalone_monitor = "YamViserAgent" not in agent_target
-        needs_session_monitor = "YamViserAgent" in agent_target and has_collection
-
-        if main_config.enable_monitor and (needs_standalone_monitor or needs_session_monitor):
+        if main_config.enable_monitor and "YamViserAgent" not in agent_target:
             is_bimanual = len(robots) > 1
             right_extrinsic = (
                 main_config.station_metadata.get("extrinsics", {}).get("right_arm_extrinsic")
@@ -297,12 +290,11 @@ def main(args: Args) -> None:
                 else None
             )
             monitor = ViserMonitor(
-                enable_urdf=not needs_session_monitor,  # skip URDF if agent has its own
+                enable_urdf=True,
                 bimanual=is_bimanual,
                 right_arm_extrinsic=right_extrinsic,
             )
-            label = "session panel + camera feeds" if needs_session_monitor else "camera feeds + recording + URDF"
-            logger.info("ViserMonitor started (standalone) for {}", label)
+            logger.info("ViserMonitor started (standalone) for camera feeds + recording + URDF")
 
         logger.info("Creating robot environment...")
         frequency = main_config.hz
@@ -350,30 +342,10 @@ def main(args: Args) -> None:
             recorder = instantiate(main_config.recording)
             logger.info("EpisodeRecorder configured (base_dir={})", recorder.base_dir)
 
-        # Use viser GUI panel when a monitor is available and session is active;
-        # fall back to Rich terminal TUI otherwise.
-        display: Any = None
-        if monitor is not None and session is not None:
-            from limb.recording.trigger import CompositeTrigger
-            from limb.visualization.viser_session_panel import ViserSessionPanel
-
-            panel = ViserSessionPanel(viser_server=monitor.viser_server)
-            panel.start()
-            display = panel
-            # Hide ViserMonitor's standalone record button — session panel handles it
-            try:
-                if hasattr(monitor, "_record_button"):
-                    monitor._record_button.visible = False
-            except AttributeError:
-                pass  # viser version may not support .visible
-            # Compose GUI buttons with existing trigger (first signal wins)
-            session.trigger = CompositeTrigger(sources=[panel, session.trigger])
-            session.display = panel
-        else:
-            display = StatusDisplay()
-            display.start()
-            if session is not None:
-                session.display = display
+        display = StatusDisplay()
+        display.start()
+        if session is not None:
+            session.display = display
 
         logger.info("Starting control loop...")
         try:
