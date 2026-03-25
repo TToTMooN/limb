@@ -7,11 +7,10 @@ import numpy as np
 import viser
 import viser.extras
 from dm_env.specs import Array
-from loguru import logger
 
 from limb.agents.agent import Agent
 from limb.utils.portal_utils import remote
-from limb.visualization.viser_monitor import ViserMonitor
+from limb.visualization.panels.camera_panel import CameraPanel
 
 
 def _create_ik_solver(solver_name: str, ik_params: Optional[Dict[str, Any]] = None, **kwargs):
@@ -43,8 +42,9 @@ class YamViserAgent(Agent):
         self.viser_server = viser.ViserServer()
         self.ik = _create_ik_solver(ik_solver, ik_params=ik_params, viser_server=self.viser_server, bimanual=bimanual)
 
-        # Shared monitor handles camera feeds + recording on the same server
-        self._monitor = ViserMonitor(self.viser_server)
+        # Camera panel handles feed thumbnails on the same server
+        self._camera_panel = CameraPanel()
+        self._camera_panel.attach(self.viser_server)
 
         self.ik_thread = threading.Thread(target=self.ik.run)
         self.ik_thread.start()
@@ -99,8 +99,8 @@ class YamViserAgent(Agent):
     def act(self, obs: Dict[str, Any]) -> Any:
         self.obs = deepcopy(obs)
 
-        # Feed camera images to monitor
-        self._monitor.update(obs)
+        # Feed camera images to camera panel
+        self._camera_panel.update(obs)
 
         action = {
             "left": {
@@ -118,7 +118,7 @@ class YamViserAgent(Agent):
         return action
 
     def close(self) -> None:
-        self._monitor.close()
+        self._camera_panel.detach()
 
     @remote(serialization_needed=True)
     def action_spec(self) -> Dict[str, Dict[str, Array]]:
