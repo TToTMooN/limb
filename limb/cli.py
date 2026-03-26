@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Annotated, Optional, Tuple, Union
 
 import tyro
 
@@ -183,14 +183,14 @@ class UploadCommand:
 
 
 Command = Union[
-    TeleopCommand,
-    RecordCommand,
-    DevicesCommand,
-    ReplayCommand,
-    ConvertLerobotCommand,
-    ConvertWebdatasetCommand,
-    VisualizeCommand,
-    UploadCommand,
+    Annotated[TeleopCommand, tyro.conf.subcommand("teleop")],
+    Annotated[RecordCommand, tyro.conf.subcommand("record")],
+    Annotated[DevicesCommand, tyro.conf.subcommand("devices")],
+    Annotated[ReplayCommand, tyro.conf.subcommand("replay")],
+    Annotated[ConvertLerobotCommand, tyro.conf.subcommand("convert-lerobot")],
+    Annotated[ConvertWebdatasetCommand, tyro.conf.subcommand("convert-webdataset")],
+    Annotated[VisualizeCommand, tyro.conf.subcommand("visualize")],
+    Annotated[UploadCommand, tyro.conf.subcommand("upload")],
 ]
 
 
