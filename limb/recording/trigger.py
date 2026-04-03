@@ -178,12 +178,14 @@ class FootPedalTrigger:
     right_key: str = "KEY_B"
     left_signal: str = "START_STOP"
     right_signal: str = "DISCARD"
+    debounce_s: float = 0.3
 
     def __post_init__(self) -> None:
         import evdev as _evdev
         from loguru import logger
 
         self._device: _evdev.InputDevice | None = None
+        self._last_signal_time = 0.0
 
         if self.device_path == "auto":
             self._device = self._find_device()
@@ -240,10 +242,12 @@ class FootPedalTrigger:
         if self._device is None:
             return None
         import select as _select
+        import time
 
         r, _, _ = _select.select([self._device], [], [], 0)
         if not r:
             return None
+        now = time.time()
         signal = None
         for event in self._device.read():
             if event.type == 1 and event.value == 1:  # EV_KEY, key down
@@ -251,6 +255,10 @@ class FootPedalTrigger:
                     signal = self._left_signal
                 elif event.code == self._right_code:
                     signal = self._right_signal
+        if signal is not None and now - self._last_signal_time < self.debounce_s:
+            return None
+        if signal is not None:
+            self._last_signal_time = now
         return signal
 
     def close(self) -> None:
