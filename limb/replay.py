@@ -15,7 +15,7 @@ import json
 import signal
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from loguru import logger
@@ -67,7 +67,7 @@ def _load_episode_data(episode_dir: Path) -> Dict[str, Any]:
 
 def replay_episode(
     episode_dir: str,
-    config_path: List[str],
+    config_path: Optional[List[str]] = None,
     speed: float = 1.0,
     log_level: str = "INFO",
 ) -> None:
@@ -77,8 +77,11 @@ def replay_episode(
     ----------
     episode_dir : str
         Path to the episode directory containing states/actions.
-    config_path : list[str]
-        Robot config YAML paths (needed to initialize hardware).
+    config_path : list[str] or None
+        Optional fallback robot config YAML paths. Only used when the
+        episode's metadata.json does not contain `robot_configs` (older
+        recordings). Newer episodes embed the exact hardware config at
+        record time and replay ignores this argument.
     speed : float
         Playback speed multiplier (0.5 = half speed, 2.0 = double).
     log_level : str
@@ -134,14 +137,29 @@ def replay_episode(
     else:
         logger.info("Replaying from recorded states (joint_pos only)")
 
-    # Load config and initialize hardware
-    configs_dict = DictLoader.load(config_path)
-    configs_dict.pop("agent", None)
-    configs_dict.pop("sensors", None)
-    configs_dict.pop("api_servers", None)
-    configs_dict.pop("collection", None)
-    configs_dict.pop("recording", None)
-    main_config = instantiate(configs_dict)
+    # Prefer robot_configs embedded in the episode metadata — this is the
+    # exact hardware the episode was recorded on. Fall back to --config-path
+    # only for older recordings that predate embedded configs.
+    embedded_robot_configs = episode_data.get("metadata", {}).get("robot_configs")
+    if embedded_robot_configs:
+        logger.info("Using robot_configs from episode metadata ({} arms)", len(embedded_robot_configs))
+        robots_cfg: Dict[str, Any] = embedded_robot_configs
+    else:
+        if not config_path:
+            logger.error(
+                "Episode metadata has no 'robot_configs' and no --config-path was provided. "
+                "Re-record the episode or pass --config-path to replay."
+            )
+            return
+        logger.warning("Episode metadata missing 'robot_configs'; falling back to --config-path")
+        configs_dict = DictLoader.load(list(config_path))
+        configs_dict.pop("agent", None)
+        configs_dict.pop("sensors", None)
+        configs_dict.pop("api_servers", None)
+        configs_dict.pop("collection", None)
+        configs_dict.pop("recording", None)
+        main_config = instantiate(configs_dict)
+        robots_cfg = main_config.robots
 
     original_sigint = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, _sigint_handler)
@@ -151,7 +169,7 @@ def replay_episode(
 
     try:
         setup_can_interfaces()
-        robots = initialize_robots(main_config.robots, server_processes)
+        robots = initialize_robots(robots_cfg, server_processes)
 
         # Move to first pose over 3 seconds
         first_targets = {}

@@ -42,6 +42,26 @@ IK_WARMUP_POLL_S = 0.1
 _shutdown_requested = False
 
 
+def _resolve_robot_configs(robots_cfg: Any) -> Dict[str, Any]:
+    """Resolve each robot's YAML path(s) into a merged config dict.
+
+    Stored in episode metadata so `limb replay` can reconstruct the exact
+    hardware the episode was recorded on, without needing a launch config.
+    """
+    resolved: Dict[str, Any] = {}
+    for name, path_or_list in robots_cfg.items():
+        if isinstance(path_or_list, str):
+            resolved[name] = DictLoader.load(path_or_list)
+        elif isinstance(path_or_list, (list, tuple)):
+            resolved[name] = DictLoader.load(list(path_or_list))
+        else:
+            try:
+                resolved[name] = DictLoader.load(list(path_or_list))
+            except Exception as e:
+                logger.warning("Could not resolve robot config for '{}': {}", name, e)
+    return resolved
+
+
 def _sigint_handler(signum, frame):
     """Handle SIGINT by setting a flag instead of raising KeyboardInterrupt.
 
@@ -335,11 +355,14 @@ def main(args: Args) -> None:
         # --- Episode recorder / collection session ---
         recorder: Optional[EpisodeRecorder] = None
         session: Optional[DataCollectionSession] = None
+        resolved_robot_configs = _resolve_robot_configs(main_config.robots)
         if main_config.collection is not None:
             session = instantiate(main_config.collection)
+            session.recorder.robot_configs = resolved_robot_configs
             logger.info("DataCollectionSession configured (target={} episodes)", session.num_episodes)
         elif main_config.recording is not None:
             recorder = instantiate(main_config.recording)
+            recorder.robot_configs = resolved_robot_configs
             logger.info("EpisodeRecorder configured (base_dir={})", recorder.base_dir)
 
         display = StatusDisplay()

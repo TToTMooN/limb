@@ -161,6 +161,18 @@ def _create_robot_client(robot_path_or_robot: Union[str, Robot, List[str]], serv
     Returns:
         Robot client instance
     """
+    if isinstance(robot_path_or_robot, dict) and "_target_" in robot_path_or_robot:
+        # Already-resolved robot config dict (e.g. from episode metadata)
+        robot_dict = robot_path_or_robot
+        if "Client" in robot_dict["_target_"]:
+            return instantiate(robot_dict)
+        _, robot_client = launch_remote_get_local_handler(
+            robot_dict,
+            process_pool=server_processes,
+            custom_remote_methods=ROBOT_PROTOCOL_METHODS,
+        )
+        return robot_client  # type: ignore
+
     if isinstance(robot_path_or_robot, (str, omegaconf.listconfig.ListConfig, list)):
         # Handle configuration file path(s)
         if isinstance(robot_path_or_robot, omegaconf.listconfig.ListConfig):
@@ -237,10 +249,11 @@ def cleanup_processes(agent: Any, server_processes: List[Any]) -> None:
     """
     logger.info("Cleaning up processes...")
 
-    try:
-        agent.close()
-    except Exception as e:
-        logger.warning(f"Error closing agent: {e}")
+    if agent is not None:
+        try:
+            agent.close()
+        except Exception as e:
+            logger.warning(f"Error closing agent: {e}")
 
     # Terminate server processes
     for server_process in server_processes:

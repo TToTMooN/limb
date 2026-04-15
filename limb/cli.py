@@ -43,7 +43,7 @@ class TeleopCommand:
 class RecordCommand:
     """Launch a data collection session (teleop + recording)."""
 
-    config_path: Tuple[str, ...] = ("configs/yam_gello_bimanual.yaml", "configs/collection.yaml")
+    config_path: Tuple[str, ...] = ("configs/yam_gello_network_bimanual.yaml", "configs/collection_pedal.yaml")
     log_level: str = "INFO"
 
     def run(self) -> None:
@@ -70,10 +70,14 @@ class ReplayCommand:
 
     Streams joint commands from a recorded episode to the physical robot.
     Useful for checking recording quality before conversion.
+
+    By default, the robot configuration is loaded from the episode's
+    metadata.json (embedded at record time). --config-path is only needed
+    for older recordings that predate embedded configs.
     """
 
     episode_dir: str = ""
-    config_path: Tuple[str, ...] = ("configs/yam_gello_bimanual.yaml",)
+    config_path: Tuple[str, ...] = ()
     speed: float = 1.0
     log_level: str = "INFO"
 
@@ -82,7 +86,7 @@ class ReplayCommand:
 
         replay_episode(
             episode_dir=self.episode_dir,
-            config_path=[os.path.expanduser(x) for x in self.config_path],
+            config_path=[os.path.expanduser(x) for x in self.config_path] if self.config_path else None,
             speed=self.speed,
             log_level=self.log_level,
         )

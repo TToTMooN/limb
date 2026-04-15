@@ -52,6 +52,7 @@ class EpisodeRecorder:
     recording_fps: int = 30
     auto_start: bool = False
     ee_frame_names: Optional[Dict[str, str]] = None
+    robot_configs: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         self._recording = False
@@ -287,6 +288,8 @@ class EpisodeRecorder:
         self._metadata["cameras"] = list(self._cam_timestamps.keys())
         self._metadata["arms"] = list(self._arm_states.keys())
         self._metadata["has_depth"] = bool(self._depth_writers)
+        if self.robot_configs is not None:
+            self._metadata["robot_configs"] = self.robot_configs
         with open(str(episode_dir / "metadata.json"), "w") as f:
             json.dump(self._metadata, f, indent=2, default=str)
 
