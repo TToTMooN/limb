@@ -42,6 +42,47 @@ IK_WARMUP_POLL_S = 0.1
 _shutdown_requested = False
 
 
+def _resolve_robot_configs(robots_cfg: Any) -> Dict[str, Any]:
+    """Resolve each robot's YAML path(s) into a merged config dict.
+
+    Stored in episode metadata so `limb replay` can reconstruct the exact
+    hardware the episode was recorded on, without needing a launch config.
+
+    Accepts any of the forms supported by `_create_robot_client`:
+      - single YAML path: ``"robot_configs/yam/left.yaml"``
+      - list/tuple of YAML paths (merged in order): ``["a.yaml", "b.yaml"]``
+      - inline dict with ``_target_`` (no disk load needed)
+      - omegaconf ListConfig/DictConfig (coerced to native types)
+    """
+    import omegaconf
+
+    resolved: Dict[str, Any] = {}
+    for name, entry in robots_cfg.items():
+        try:
+            if isinstance(entry, omegaconf.dictconfig.DictConfig):
+                entry = omegaconf.OmegaConf.to_container(entry, resolve=True)
+            if isinstance(entry, omegaconf.listconfig.ListConfig):
+                entry = list(entry)
+
+            if isinstance(entry, dict):
+                # Already a fully-resolved config dict (inline `_target_`)
+                resolved[name] = dict(entry)
+            elif isinstance(entry, str):
+                resolved[name] = DictLoader.load(entry)
+            elif isinstance(entry, (list, tuple)):
+                resolved[name] = DictLoader.load(list(entry))
+            else:
+                logger.warning(
+                    "Unrecognised robot config entry type for '{}': {!r}. "
+                    "Episode metadata will omit this arm's robot_configs.",
+                    name,
+                    type(entry).__name__,
+                )
+        except Exception as e:
+            logger.warning("Could not resolve robot config for '{}': {}", name, e)
+    return resolved
+
+
 def _sigint_handler(signum, frame):
     """Handle SIGINT by setting a flag instead of raising KeyboardInterrupt.
 
@@ -335,11 +376,14 @@ def main(args: Args) -> None:
         # --- Episode recorder / collection session ---
         recorder: Optional[EpisodeRecorder] = None
         session: Optional[DataCollectionSession] = None
+        resolved_robot_configs = _resolve_robot_configs(main_config.robots)
         if main_config.collection is not None:
             session = instantiate(main_config.collection)
+            session.recorder.robot_configs = resolved_robot_configs
             logger.info("DataCollectionSession configured (target={} episodes)", session.num_episodes)
         elif main_config.recording is not None:
             recorder = instantiate(main_config.recording)
+            recorder.robot_configs = resolved_robot_configs
             logger.info("EpisodeRecorder configured (base_dir={})", recorder.base_dir)
 
         display = StatusDisplay()

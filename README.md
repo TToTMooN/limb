@@ -16,7 +16,7 @@ Built for [I2RT YAM](https://github.com/i2rt-robotics/i2rt) bimanual arms.
 | **Policy-ready**         | Ship your VLA as a server, point limb at it, run inference.                  |
 | **Data collection**      | Hands-free episode recording with foot pedal / VR button triggers.           |
 
-**Docs:** [Teleoperation](docs/teleop.md) · [Data Collection](docs/data_collection.md) · [Policy Server Spec](docs/policy_server_spec.md)
+**Docs:** [CLI Reference](docs/cli.md) · [Teleoperation](docs/teleop.md) · [Data Collection](docs/data_collection.md) · [Policy Server Spec](docs/policy_server_spec.md)
 
 ---
 
@@ -58,16 +58,19 @@ See [docs/teleop.md](docs/teleop.md) for GELLO and VR hardware setup.
 
 ## Quick Start
 
+All common operations are exposed through a single `limb` CLI. Full reference in [docs/cli.md](docs/cli.md).
+
 ```bash
-uv run limb/envs/launch.py --config_path <config.yaml>
+uv run limb --help                # list subcommands
+uv run limb <cmd> --help          # flags for one subcommand
 ```
 
 ### Teleoperation
 
 ```bash
-uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml    # Viser web UI
-uv run limb/envs/launch.py --config_path configs/yam_gello_bimanual.yaml    # GELLO leader arms
-uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml       # Pico VR
+uv run limb teleop --config-path configs/yam_viser_bimanual.yaml    # Viser web UI
+uv run limb teleop --config-path configs/yam_gello_bimanual.yaml    # GELLO leader arms
+uv run limb teleop --config-path configs/yam_vr_bimanual.yaml       # Pico VR
 ```
 
 ### Data Collection
@@ -75,31 +78,37 @@ uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml       # Pi
 Collection configs are overlays — combine with any teleop config:
 
 ```bash
-uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
-uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
+uv run limb record --config-path configs/yam_gello_network_bimanual.yaml configs/collection_pedal.yaml
+uv run limb record --config-path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
 ```
 
 ### Policy Deployment
 
 ```bash
-uv run limb/envs/launch.py --config_path configs/yam_pi0_bimanual.yaml      # OpenPI (pi0)
-uv run limb/envs/launch.py --config_path configs/yam_policy_bimanual.yaml    # Generic WebSocket
+uv run limb teleop --config-path configs/yam_pi0_bimanual.yaml       # OpenPI (pi0)
+uv run limb teleop --config-path configs/yam_policy_bimanual.yaml    # Generic WebSocket
 ```
 
 ### Data Tools
 
 ```bash
-# Visualize a recorded episode in Rerun (joint trajectories + camera video)
-uv run scripts/data/visualize_episode.py --episode_dir recordings/red_cube_task/episode_20260304_153045_0001
+# Hardware discovery (cameras, CAN, pedals, etc.)
+uv run limb devices
 
-# Skip video (faster, joint data only)
-uv run scripts/data/visualize_episode.py --episode_dir recordings/red_cube_task/episode_20260304_153045_0001 --no-video
+# Replay a recorded episode on hardware (robot config read from episode metadata)
+uv run limb replay --episode-dir recordings/red_cube_task/episode_20260304_153045_0001
+
+# Visualize a recorded episode in Rerun
+uv run limb visualize --episode-dir recordings/red_cube_task/episode_20260304_153045_0001
 
 # Convert a session to LeRobot v2.1 format (no lerobot dependency needed)
-uv run scripts/data/convert_to_lerobot.py --input_dir recordings/red_cube_task --output_dir datasets/red_cube
+uv run limb convert-lerobot --input-dir recordings/red_cube_task --output-dir datasets/red_cube
 
 # Only include successful episodes
-uv run scripts/data/convert_to_lerobot.py --input_dir recordings/red_cube_task --output_dir datasets/red_cube --success_only
+uv run limb convert-lerobot --input-dir recordings/red_cube_task --output-dir datasets/red_cube --success-only
+
+# Upload a dataset (S3 / GCS / HuggingFace Hub)
+uv run limb upload --source datasets/red_cube --target hf://myuser/red_cube
 ```
 
 ### Diagnostics

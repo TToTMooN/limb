@@ -52,6 +52,7 @@ class EpisodeRecorder:
     recording_fps: int = 30
     auto_start: bool = False
     ee_frame_names: Optional[Dict[str, str]] = None
+    robot_configs: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         self._recording = False
@@ -72,6 +73,9 @@ class EpisodeRecorder:
         # Metadata
         self._metadata: Dict[str, Any] = {}
 
+        # Clean up any incomplete episodes from previous runs
+        self._cleanup_incomplete_episodes()
+
         if self.auto_start:
             self.start_episode()
 
@@ -82,6 +86,91 @@ class EpisodeRecorder:
             return 0
         existing = sorted(base.glob("episode_*"))
         return len(existing)
+
+    def _cleanup_incomplete_episodes(self) -> None:
+        """Remove incomplete episodes from previous runs.
+
+        An episode is considered incomplete if it has a RECORDING_IN_PROGRESS
+        marker but no metadata.json (meaning it was interrupted before saving).
+
+        Safety: the marker file contains the PID that created it. We only
+        delete an episode if the owning process is no longer running, to
+        avoid removing another process's active recording.
+        """
+        import shutil
+
+        base = Path(self.base_dir)
+        if not base.exists():
+            return
+
+        for ep_dir in sorted(base.glob("episode_*")):
+            marker = ep_dir / "RECORDING_IN_PROGRESS"
+            metadata = ep_dir / "metadata.json"
+            if marker.exists() and not metadata.exists():
+                # Check if the owning process is still alive
+                if self._is_marker_owner_alive(marker):
+                    logger.debug("Skipping active recording (owner alive): {}", ep_dir.name)
+                    continue
+                logger.warning("Removing incomplete episode: {}", ep_dir.name)
+                shutil.rmtree(ep_dir, ignore_errors=True)
+            elif marker.exists() and metadata.exists():
+                # Recording finished but marker wasn't cleaned up (crash during save)
+                marker.unlink(missing_ok=True)
+
+    @staticmethod
+    def _read_proc_starttime(pid: int) -> Optional[int]:
+        """Read a process's start time (clock ticks since boot) from /proc/<pid>/stat.
+
+        Parses field 22 of /proc/<pid>/stat (`starttime` per proc(5)). This is
+        an immutable per-process identifier — unlike the PID itself, it does
+        not get recycled. Used to detect PID reuse when a marker file outlives
+        its original owner.
+        """
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as f:
+                data = f.read()
+        except OSError:
+            return None
+        # The `comm` field (2nd) may contain arbitrary bytes including spaces,
+        # but is wrapped in parens — find the last ')' to skip past it safely.
+        rparen = data.rfind(b")")
+        if rparen < 0:
+            return None
+        try:
+            fields = data[rparen + 2 :].split()
+            # After (pid comm), the remaining fields are state(0), ppid(1), ...
+            # starttime is field 22 in proc(5), i.e. index 19 in this tail slice.
+            return int(fields[19])
+        except (IndexError, ValueError):
+            return None
+
+    @staticmethod
+    def _is_marker_owner_alive(marker: Path) -> bool:
+        """Check if the process that wrote the marker is still running.
+
+        Reads `<pid>\\n<starttime>` from the marker and compares both to the
+        current state of /proc. A bare-PID marker (written before start time
+        was tracked) is treated as alive iff the PID still exists — slightly
+        looser but backwards-compatible.
+        """
+        try:
+            parts = marker.read_text().strip().split("\n")
+            pid = int(parts[0])
+        except (ValueError, OSError):
+            return False
+
+        current_starttime = EpisodeRecorder._read_proc_starttime(pid)
+        if current_starttime is None:
+            return False
+
+        if len(parts) < 2:
+            # Legacy marker without starttime — fall back to PID-exists check.
+            return True
+        try:
+            stored_starttime = int(parts[1])
+        except ValueError:
+            return True
+        return stored_starttime == current_starttime
 
     @property
     def is_recording(self) -> bool:
@@ -108,6 +197,15 @@ class EpisodeRecorder:
             self._metadata["start_time_str"] = ts
             if self.ee_frame_names is not None:
                 self._metadata["ee_frame_names"] = self.ee_frame_names
+
+            # Mark episode as in-progress with our PID + process start time
+            # (immune to PID reuse; removed on successful save).
+            import os
+
+            pid = os.getpid()
+            starttime = self._read_proc_starttime(pid)
+            marker_text = f"{pid}\n{starttime}\n" if starttime is not None else f"{pid}\n"
+            (self._episode_dir / "RECORDING_IN_PROGRESS").write_text(marker_text)
 
             self._recording = True
             self._episode_count += 1
@@ -166,6 +264,11 @@ class EpisodeRecorder:
                 self._writers[cam_name].write(cam_obs.rgb)
                 self._cam_timestamps[cam_name].append(cam_obs.timestamp)
 
+                # NOTE: depth recording is intentionally not implemented yet.
+                # robocam.AsyncVideoWriter is hardcoded for 8-bit RGB input; a
+                # correct 16-bit depth pipeline (FFV1 or compressed npz) should
+                # live in robocam, not here. Track in robocam when needed.
+
             self._step_idx += 1
 
     def stop_episode(self) -> Optional[Path]:
@@ -217,8 +320,13 @@ class EpisodeRecorder:
         self._metadata["recording_fps"] = self.recording_fps
         self._metadata["cameras"] = list(self._cam_timestamps.keys())
         self._metadata["arms"] = list(self._arm_states.keys())
+        if self.robot_configs is not None:
+            self._metadata["robot_configs"] = self.robot_configs
         with open(str(episode_dir / "metadata.json"), "w") as f:
             json.dump(self._metadata, f, indent=2, default=str)
+
+        # Remove in-progress marker — episode is now complete
+        (episode_dir / "RECORDING_IN_PROGRESS").unlink(missing_ok=True)
 
         logger.info(
             "Episode saved: {} ({} steps, {:.1f}s)",

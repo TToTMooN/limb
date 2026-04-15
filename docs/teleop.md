@@ -3,8 +3,10 @@
 Every launch follows the same pattern — one entrypoint, one YAML config:
 
 ```bash
-uv run limb/envs/launch.py --config_path <config.yaml>
+uv run limb teleop --config-path <config.yaml>
 ```
+
+See [docs/cli.md](cli.md) for the full CLI reference.
 
 ---
 
@@ -15,10 +17,10 @@ IK via [Pink](https://github.com/stephane-caron/pink) (Pinocchio QP) or [pyroki]
 
 ```bash
 # Bimanual (open browser at localhost:8080)
-uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml
+uv run limb teleop --config-path configs/yam_viser_bimanual.yaml
 
 # Single arm
-uv run limb/envs/launch.py --config_path configs/yam_viser_single_arm.yaml
+uv run limb teleop --config-path configs/yam_viser_single_arm.yaml
 ```
 
 ---
@@ -31,7 +33,7 @@ Direct joint-to-joint mapping — leader and follower share kinematics, no IK ne
 
 ```bash
 # USB (direct connection)
-uv run limb/envs/launch.py --config_path configs/yam_gello_bimanual.yaml
+uv run limb teleop --config-path configs/yam_gello_bimanual.yaml
 ```
 
 ### GELLO Network Mode (R1 Lite)
@@ -45,7 +47,7 @@ bash scripts/start_gello_server.sh 10.42.0.2    # custom host
 bash scripts/start_gello_server.sh --kill        # stop server
 
 # On workstation
-uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml
+uv run limb teleop --config-path configs/yam_gello_network_bimanual.yaml
 ```
 
 ---
@@ -66,7 +68,7 @@ Cartesian control via Pico VR controllers through [XRoboToolkit](https://github.
 ### Launch
 
 ```bash
-uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml
+uv run limb teleop --config-path configs/yam_vr_bimanual.yaml
 ```
 
 ### Button Mapping

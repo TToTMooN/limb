@@ -10,19 +10,21 @@ Collection configs are overlays — combine with any teleop config:
 
 ```bash
 # GELLO (network) + keyboard triggers
-uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
+uv run limb record --config-path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
 
-# GELLO (network) + foot pedal (iKKEGOL double pedal) + keyboard fallback
-uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection_pedal.yaml
+# GELLO (network) + foot pedal (iKKEGOL double pedal) + keyboard fallback (default)
+uv run limb record
 
 # VR + VR button triggers
-uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
+uv run limb record --config-path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
 
 # Viser + keyboard triggers
-uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml configs/collection.yaml
+uv run limb record --config-path configs/yam_viser_bimanual.yaml configs/collection.yaml
 ```
 
 The second YAML merges into the first via OmegaConf, adding the `collection:` block without duplicating teleop/robot/camera config.
+
+See [docs/cli.md](cli.md) for the full CLI reference.
 
 ---
 
@@ -115,7 +117,7 @@ Each episode is saved as a directory:
 recordings/red_cube_task/
   session_summary.json                    # session-level stats
   episode_20260304_153045_0001/
-    metadata.json                         # config, timing, ee frame names, arm/camera lists
+    metadata.json                         # config, timing, ee frame names, robot_configs, arm/camera lists
     timestamps.npy                        # (N,) float64 Unix timestamps at control rate
     left_states.npz                       # joint_pos (N,6), joint_vel (N,6), gripper_pos (N,1), ee_pose (N,7)
     right_states.npz                      # same structure
@@ -131,6 +133,10 @@ recordings/red_cube_task/
   episode_20260304_153120_0002/
     ...
 ```
+
+`metadata.json` embeds the fully resolved `robot_configs` dict (per arm, with motor chain / CAN channel / PID gains), so `limb replay` can reconstruct the exact hardware the episode was recorded on without any launch config.
+
+Interrupted recordings leave a `RECORDING_IN_PROGRESS` marker file (containing the owning PID). On the next `limb record` startup the incomplete episode is auto-cleaned — provided the owning process is no longer alive, to avoid racing with a concurrent recording.
 
 ### Standalone Recording (no session)
 
@@ -177,35 +183,84 @@ Robot holds last commanded position during save.
 
 ## Data Tools
 
+### Replay on Hardware
+
+Before converting, you can verify a recording by streaming its joint commands back to the robot:
+
+```bash
+uv run limb replay --episode-dir recordings/red_cube_task/episode_20260304_153045_0001
+uv run limb replay --episode-dir recordings/red_cube_task/episode_20260304_153045_0001 --speed 0.5
+```
+
+No `--config-path` is needed — the robot config is read from the episode's `metadata.json`.
+
 ### Visualize Episodes (Rerun)
 
 View recorded episodes with synchronized joint trajectories, gripper state, EE pose, and camera video:
 
 ```bash
-# Full visualization (joints + cameras)
-uv run scripts/data/visualize_episode.py --episode_dir recordings/red_cube_task/episode_20260304_153045_0001
-
-# Joint data only (skip video decoding)
-uv run scripts/data/visualize_episode.py --episode_dir recordings/red_cube_task/episode_20260304_153045_0001 --no-video
+uv run limb visualize --episode-dir recordings/red_cube_task/episode_20260304_153045_0001
 ```
 
 Opens the [Rerun](https://rerun.io) viewer with a timeline scrubber. Per-joint position/velocity traces, gripper state, and camera frames are all time-aligned.
 
 ### Convert to LeRobot Format
 
-Convert a session (directory of episodes) to [LeRobot v2.1](https://github.com/huggingface/lerobot) dataset format. No lerobot dependency required — only uses pyarrow:
+Convert a session (directory of episodes) to [LeRobot v2.1](https://github.com/huggingface/lerobot) dataset format. No `lerobot` dependency required — only uses pyarrow:
 
 ```bash
 # Convert all episodes in a session
-uv run scripts/data/convert_to_lerobot.py --input_dir recordings/red_cube_task --output_dir datasets/red_cube
+uv run limb convert-lerobot --input-dir recordings/red_cube_task --output-dir datasets/red_cube
 
 # Only include successful episodes
-uv run scripts/data/convert_to_lerobot.py --input_dir recordings/red_cube_task --output_dir datasets/red_cube --success_only
+uv run limb convert-lerobot --input-dir recordings/red_cube_task --output-dir datasets/red_cube --success-only
 
 # Override task instruction
-uv run scripts/data/convert_to_lerobot.py --input_dir recordings/red_cube_task --output_dir datasets/red_cube \
+uv run limb convert-lerobot \
+  --input-dir recordings/red_cube_task \
+  --output-dir datasets/red_cube \
   --task "pick up the red cube and place it in the bowl"
+
+# Push to HuggingFace Hub after conversion
+uv run limb convert-lerobot \
+  --input-dir recordings/red_cube_task \
+  --output-dir datasets/red_cube \
+  --push-to-hub myuser/red_cube
 ```
+
+Incomplete or interrupted episodes (no `metadata.json`, or still carrying a `RECORDING_IN_PROGRESS` marker) are automatically skipped with a warning.
+
+> **Success markers.** `--success-only` filters to episodes that have a `SUCCESS` marker file. The foot-pedal workflow doesn't mark success inline (left pedal is a neutral toggle; right pedal discards), so you'll typically collect first and mark later:
+>
+> ```bash
+> # Mark all as success (if you trust every take)
+> uv run limb mark --session-dir recordings/task --all
+>
+> # Or review interactively and mark one by one
+> uv run limb mark --session-dir recordings/task
+> ```
+
+### Convert to WebDataset
+
+Convert a session into WebDataset `.tar` shards for streaming training:
+
+```bash
+uv run limb convert-webdataset \
+  --input-dir recordings/red_cube_task \
+  --output-dir datasets/red_cube_wds \
+  --samples-per-shard 1000 \
+  --jpeg-quality 90
+```
+
+### Upload to Cloud Storage
+
+```bash
+uv run limb upload --source datasets/red_cube --target s3://my-bucket/datasets/red_cube
+uv run limb upload --source datasets/red_cube --target gs://my-bucket/datasets/red_cube
+uv run limb upload --source datasets/red_cube --target hf://myuser/red_cube
+```
+
+A default target can be configured in `~/.config/limb/storage.yaml` so repeat uploads don't need `--target`.
 
 Output structure:
 

@@ -112,29 +112,39 @@ Episode save (~100-200ms) runs synchronously between episodes. Robot holds last 
 
 ## Launch Commands
 
+All common operations go through the `limb` CLI. Full reference: `docs/cli.md`.
+
 ```bash
 # Teleoperation
-uv run limb/envs/launch.py --config_path configs/yam_viser_bimanual.yaml
-uv run limb/envs/launch.py --config_path configs/yam_gello_bimanual.yaml
-uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml
+uv run limb teleop --config-path configs/yam_viser_bimanual.yaml
+uv run limb teleop --config-path configs/yam_gello_bimanual.yaml
+uv run limb teleop --config-path configs/yam_vr_bimanual.yaml
 
 # Data collection (overlay configs — combine with any teleop config)
-uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
-uv run limb/envs/launch.py --config_path configs/yam_gello_network_bimanual.yaml configs/collection_pedal.yaml  # foot pedal
-uv run limb/envs/launch.py --config_path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
+uv run limb record --config-path configs/yam_gello_network_bimanual.yaml configs/collection.yaml
+uv run limb record  # default: GELLO network + foot pedal
+uv run limb record --config-path configs/yam_vr_bimanual.yaml configs/collection_vr.yaml
 
-# Policy deployment
-uv run limb/envs/launch.py --config_path configs/yam_pi0_bimanual.yaml
-uv run limb/envs/launch.py --config_path configs/yam_policy_bimanual.yaml
+# Policy deployment (still goes through `limb teleop` — no separate subcommand)
+uv run limb teleop --config-path configs/yam_pi0_bimanual.yaml
+uv run limb teleop --config-path configs/yam_policy_bimanual.yaml
 
-# Diagnostics
+# Hardware discovery
+uv run limb devices
+
+# Replay a recorded episode (robot config read from episode metadata)
+uv run limb replay --episode-dir recordings/task/episode_...
+
+# Data tools
+uv run limb visualize --episode-dir recordings/task/episode_...
+uv run limb convert-lerobot --input-dir recordings/task --output-dir datasets/task
+uv run limb convert-webdataset --input-dir recordings/task --output-dir datasets/task_wds
+uv run limb upload --source datasets/task --target hf://myuser/task
+
+# Diagnostics (hardware-level test scripts, not part of the CLI)
 uv run scripts/diagnostics/test_realsense_cameras.py
 uv run scripts/diagnostics/test_gello_input.py
 uv run scripts/diagnostics/test_vr_input.py
-
-# Data tools (requires: uv sync --extra data)
-uv run scripts/data/visualize_episode.py --episode_dir recordings/episode_...
-uv run scripts/data/convert_to_lerobot.py --input_dir recordings/task --output_dir datasets/task
 ```
 
 ---
