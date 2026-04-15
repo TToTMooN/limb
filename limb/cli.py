@@ -6,6 +6,7 @@ Provides a single `limb` command with subcommands for all common operations:
     limb record           — Launch data collection session
     limb devices          — Discover connected hardware
     limb replay           — Replay a recorded episode on hardware
+    limb mark             — Post-hoc mark recorded episodes as success
     limb convert-lerobot  — Convert raw recordings to LeRobot format
     limb convert-webdataset — Convert raw recordings to WebDataset tar shards
     limb visualize        — Visualize a recorded episode with Rerun
@@ -89,6 +90,33 @@ class ReplayCommand:
             config_path=[os.path.expanduser(x) for x in self.config_path] if self.config_path else None,
             speed=self.speed,
             log_level=self.log_level,
+        )
+
+
+@dataclass
+class MarkCommand:
+    """Post-hoc mark recorded episodes as success (or clear markers).
+
+    Useful when collection triggers don't mark success inline — record
+    everything, review later, commit the good ones. With no flags, steps
+    through episodes interactively (y/n/s/q).
+    """
+
+    session_dir: Optional[str] = None
+    episode_dir: Optional[str] = None
+    all: bool = False
+    clear: bool = False
+
+    def run(self) -> None:
+        from limb.data.mark import Args, main
+
+        main(
+            Args(
+                session_dir=self.session_dir,
+                episode_dir=self.episode_dir,
+                all=self.all,
+                clear=self.clear,
+            )
         )
 
 
@@ -191,6 +219,7 @@ Command = Union[
     Annotated[RecordCommand, tyro.conf.subcommand("record")],
     Annotated[DevicesCommand, tyro.conf.subcommand("devices")],
     Annotated[ReplayCommand, tyro.conf.subcommand("replay")],
+    Annotated[MarkCommand, tyro.conf.subcommand("mark")],
     Annotated[ConvertLerobotCommand, tyro.conf.subcommand("convert-lerobot")],
     Annotated[ConvertWebdatasetCommand, tyro.conf.subcommand("convert-webdataset")],
     Annotated[VisualizeCommand, tyro.conf.subcommand("visualize")],
