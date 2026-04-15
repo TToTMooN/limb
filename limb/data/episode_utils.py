@@ -67,9 +67,6 @@ def load_episode(episode_dir: Path) -> Dict:
     data["cameras"] = []
     for mp4 in sorted(episode_dir.glob("*.mp4")):
         cam_name = mp4.stem
-        # Skip depth videos
-        if cam_name.endswith("_depth"):
-            continue
         cam_ts_path = episode_dir / f"{cam_name}_timestamps.npy"
         data["cameras"].append(
             {

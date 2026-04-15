@@ -70,9 +70,6 @@ class EpisodeRecorder:
         self._writers: Dict[str, AsyncVideoWriter] = {}
         self._cam_timestamps: Dict[str, List[float]] = {}
 
-        # Depth recording (when cameras provide depth data)
-        self._depth_writers: Dict[str, AsyncVideoWriter] = {}
-
         # Metadata
         self._metadata: Dict[str, Any] = {}
 
@@ -152,7 +149,6 @@ class EpisodeRecorder:
             self._actions = {}
             self._writers = {}
             self._cam_timestamps = {}
-            self._depth_writers = {}
             self._metadata = metadata or {}
             self._metadata["start_time"] = time.time()
             self._metadata["start_time_str"] = ts
@@ -221,18 +217,10 @@ class EpisodeRecorder:
                 self._writers[cam_name].write(cam_obs.rgb)
                 self._cam_timestamps[cam_name].append(cam_obs.timestamp)
 
-                # Record depth as 16-bit grayscale video when available
-                depth = getattr(cam_obs, "depth", None)
-                if depth is not None and cam_name not in self._depth_writers:
-                    h, w = depth.shape[:2]
-                    depth_path = str(self._episode_dir / f"{cam_name}_depth.mp4")
-                    depth_writer = AsyncVideoWriter(
-                        path=depth_path, width=w, height=h, fps=self.recording_fps, pix_fmt="gray16le"
-                    )
-                    depth_writer.start()
-                    self._depth_writers[cam_name] = depth_writer
-                if depth is not None and cam_name in self._depth_writers:
-                    self._depth_writers[cam_name].write(depth)
+                # NOTE: depth recording is intentionally not implemented yet.
+                # robocam.AsyncVideoWriter is hardcoded for 8-bit RGB input; a
+                # correct 16-bit depth pipeline (FFV1 or compressed npz) should
+                # live in robocam, not here. Track in robocam when needed.
 
             self._step_idx += 1
 
@@ -251,8 +239,6 @@ class EpisodeRecorder:
 
         # Flush async video writers (waits for ffmpeg to finish)
         for w in self._writers.values():
-            w.stop()
-        for w in self._depth_writers.values():
             w.stop()
 
         # Save timestamps
@@ -287,7 +273,6 @@ class EpisodeRecorder:
         self._metadata["recording_fps"] = self.recording_fps
         self._metadata["cameras"] = list(self._cam_timestamps.keys())
         self._metadata["arms"] = list(self._arm_states.keys())
-        self._metadata["has_depth"] = bool(self._depth_writers)
         if self.robot_configs is not None:
             self._metadata["robot_configs"] = self.robot_configs
         with open(str(episode_dir / "metadata.json"), "w") as f:
