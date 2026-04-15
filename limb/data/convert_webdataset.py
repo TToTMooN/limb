@@ -61,7 +61,6 @@ class Args:
     jpeg_quality: int = 90
     fps: int = 30
     success_only: bool = False
-    include_depth: bool = False
     camera: Optional[str] = None  # primary camera name (None = first found)
 
 

@@ -130,6 +130,9 @@ def main(args: Args) -> None:
 
     # Single-episode mode: always non-interactive (success by default, or clear)
     if args.episode_dir:
+        if args.all:
+            logger.error("--all only applies to --session-dir mode, not --episode-dir")
+            raise SystemExit(1)
         ep = Path(args.episode_dir)
         if not ep.exists():
             logger.error("Episode directory not found: {}", ep)

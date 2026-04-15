@@ -47,18 +47,39 @@ def _resolve_robot_configs(robots_cfg: Any) -> Dict[str, Any]:
 
     Stored in episode metadata so `limb replay` can reconstruct the exact
     hardware the episode was recorded on, without needing a launch config.
+
+    Accepts any of the forms supported by `_create_robot_client`:
+      - single YAML path: ``"robot_configs/yam/left.yaml"``
+      - list/tuple of YAML paths (merged in order): ``["a.yaml", "b.yaml"]``
+      - inline dict with ``_target_`` (no disk load needed)
+      - omegaconf ListConfig/DictConfig (coerced to native types)
     """
+    import omegaconf
+
     resolved: Dict[str, Any] = {}
-    for name, path_or_list in robots_cfg.items():
-        if isinstance(path_or_list, str):
-            resolved[name] = DictLoader.load(path_or_list)
-        elif isinstance(path_or_list, (list, tuple)):
-            resolved[name] = DictLoader.load(list(path_or_list))
-        else:
-            try:
-                resolved[name] = DictLoader.load(list(path_or_list))
-            except Exception as e:
-                logger.warning("Could not resolve robot config for '{}': {}", name, e)
+    for name, entry in robots_cfg.items():
+        try:
+            if isinstance(entry, omegaconf.dictconfig.DictConfig):
+                entry = omegaconf.OmegaConf.to_container(entry, resolve=True)
+            if isinstance(entry, omegaconf.listconfig.ListConfig):
+                entry = list(entry)
+
+            if isinstance(entry, dict):
+                # Already a fully-resolved config dict (inline `_target_`)
+                resolved[name] = dict(entry)
+            elif isinstance(entry, str):
+                resolved[name] = DictLoader.load(entry)
+            elif isinstance(entry, (list, tuple)):
+                resolved[name] = DictLoader.load(list(entry))
+            else:
+                logger.warning(
+                    "Unrecognised robot config entry type for '{}': {!r}. "
+                    "Episode metadata will omit this arm's robot_configs.",
+                    name,
+                    type(entry).__name__,
+                )
+        except Exception as e:
+            logger.warning("Could not resolve robot config for '{}': {}", name, e)
     return resolved
 
 

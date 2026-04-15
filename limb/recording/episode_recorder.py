@@ -118,16 +118,59 @@ class EpisodeRecorder:
                 marker.unlink(missing_ok=True)
 
     @staticmethod
-    def _is_marker_owner_alive(marker: Path) -> bool:
-        """Check if the process that wrote the marker is still running."""
-        import os
+    def _read_proc_starttime(pid: int) -> Optional[int]:
+        """Read a process's start time (clock ticks since boot) from /proc/<pid>/stat.
 
+        Parses field 22 of /proc/<pid>/stat (`starttime` per proc(5)). This is
+        an immutable per-process identifier — unlike the PID itself, it does
+        not get recycled. Used to detect PID reuse when a marker file outlives
+        its original owner.
+        """
         try:
-            pid = int(marker.read_text().strip())
-            os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
-            return True
-        except (ValueError, OSError, ProcessLookupError):
+            with open(f"/proc/{pid}/stat", "rb") as f:
+                data = f.read()
+        except OSError:
+            return None
+        # The `comm` field (2nd) may contain arbitrary bytes including spaces,
+        # but is wrapped in parens — find the last ')' to skip past it safely.
+        rparen = data.rfind(b")")
+        if rparen < 0:
+            return None
+        try:
+            fields = data[rparen + 2 :].split()
+            # After (pid comm), the remaining fields are state(0), ppid(1), ...
+            # starttime is field 22 in proc(5), i.e. index 19 in this tail slice.
+            return int(fields[19])
+        except (IndexError, ValueError):
+            return None
+
+    @staticmethod
+    def _is_marker_owner_alive(marker: Path) -> bool:
+        """Check if the process that wrote the marker is still running.
+
+        Reads `<pid>\\n<starttime>` from the marker and compares both to the
+        current state of /proc. A bare-PID marker (written before start time
+        was tracked) is treated as alive iff the PID still exists — slightly
+        looser but backwards-compatible.
+        """
+        try:
+            parts = marker.read_text().strip().split("\n")
+            pid = int(parts[0])
+        except (ValueError, OSError):
             return False
+
+        current_starttime = EpisodeRecorder._read_proc_starttime(pid)
+        if current_starttime is None:
+            return False
+
+        if len(parts) < 2:
+            # Legacy marker without starttime — fall back to PID-exists check.
+            return True
+        try:
+            stored_starttime = int(parts[1])
+        except ValueError:
+            return True
+        return stored_starttime == current_starttime
 
     @property
     def is_recording(self) -> bool:
@@ -155,10 +198,14 @@ class EpisodeRecorder:
             if self.ee_frame_names is not None:
                 self._metadata["ee_frame_names"] = self.ee_frame_names
 
-            # Mark episode as in-progress with our PID (removed on successful save)
+            # Mark episode as in-progress with our PID + process start time
+            # (immune to PID reuse; removed on successful save).
             import os
 
-            (self._episode_dir / "RECORDING_IN_PROGRESS").write_text(str(os.getpid()))
+            pid = os.getpid()
+            starttime = self._read_proc_starttime(pid)
+            marker_text = f"{pid}\n{starttime}\n" if starttime is not None else f"{pid}\n"
+            (self._episode_dir / "RECORDING_IN_PROGRESS").write_text(marker_text)
 
             self._recording = True
             self._episode_count += 1

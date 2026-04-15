@@ -85,12 +85,11 @@ uv run limb devices --verbose
 Scans for:
 - **RealSense** cameras (serial + model)
 - **ZED** cameras (when `pyzed` is installed)
-- **OpenCV** video devices
 - **CAN** interfaces matching `can*` (state up/down)
 - **Dynamixel** serial ports (GELLO USB leaders)
 - **Input devices** via evdev: foot pedals, SpaceMouse, etc.
 
-Useful as a smoke test before launching teleop.
+Useful as a smoke test before launching teleop. Generic OpenCV video devices are not enumerated — plug your webcam into limb directly by serial or `/dev/videoN`.
 
 ---
 

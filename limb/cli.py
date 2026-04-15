@@ -72,12 +72,13 @@ class ReplayCommand:
     Streams joint commands from a recorded episode to the physical robot.
     Useful for checking recording quality before conversion.
 
-    By default, the robot configuration is loaded from the episode's
-    metadata.json (embedded at record time). --config-path is only needed
-    for older recordings that predate embedded configs.
+    By default the robot configuration is loaded from the episode's
+    metadata.json (embedded at record time). Pass --config-path to
+    override that — useful when replaying on a different machine or
+    for legacy episodes without embedded configs.
     """
 
-    episode_dir: str = ""
+    episode_dir: str
     config_path: Tuple[str, ...] = ()
     speed: float = 1.0
     log_level: str = "INFO"
@@ -124,8 +125,8 @@ class MarkCommand:
 class ConvertLerobotCommand:
     """Convert raw recordings to LeRobot v2.1 dataset format."""
 
-    input_dir: str = ""
-    output_dir: str = ""
+    input_dir: str
+    output_dir: str
     task: Optional[str] = None
     robot_type: str = "yam"
     fps: int = 30
@@ -152,8 +153,8 @@ class ConvertLerobotCommand:
 class ConvertWebdatasetCommand:
     """Convert raw recordings to WebDataset .tar shards for streaming training."""
 
-    input_dir: str = ""
-    output_dir: str = ""
+    input_dir: str
+    output_dir: str
     task: Optional[str] = None
     samples_per_shard: int = 1000
     image_size: Optional[int] = None
@@ -184,7 +185,7 @@ class ConvertWebdatasetCommand:
 class VisualizeCommand:
     """Visualize a recorded episode with Rerun."""
 
-    episode_dir: str = ""
+    episode_dir: str
 
     def run(self) -> None:
         from limb.data.visualize_episode import Args, main
@@ -204,7 +205,7 @@ class UploadCommand:
     Or configure a default in ~/.config/limb/storage.yaml
     """
 
-    source: str = ""
+    source: str
     target: Optional[str] = None
     task: Optional[str] = None
 

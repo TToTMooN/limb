@@ -78,10 +78,12 @@ def replay_episode(
     episode_dir : str
         Path to the episode directory containing states/actions.
     config_path : list[str] or None
-        Optional fallback robot config YAML paths. Only used when the
-        episode's metadata.json does not contain `robot_configs` (older
-        recordings). Newer episodes embed the exact hardware config at
-        record time and replay ignores this argument.
+        Optional robot config YAML paths. When provided, acts as an
+        explicit override of the `robot_configs` embedded in the episode's
+        metadata.json (useful when replaying on a different machine, e.g.
+        different CAN channel names) and also as the fallback for legacy
+        episodes recorded before embedded configs. When omitted, the
+        embedded config from the episode is used.
     speed : float
         Playback speed multiplier (0.5 = half speed, 2.0 = double).
     log_level : str
@@ -137,21 +139,26 @@ def replay_episode(
     else:
         logger.info("Replaying from recorded states (joint_pos only)")
 
-    # Prefer robot_configs embedded in the episode metadata — this is the
-    # exact hardware the episode was recorded on. Fall back to --config-path
-    # only for older recordings that predate embedded configs.
+    # Source-of-truth logic for which robot config to replay on:
+    #
+    #   (1) User passed --config-path → always honor it (explicit override).
+    #       If the episode also has robot_configs, warn that we're overriding.
+    #   (2) No --config-path → use the embedded robot_configs from the episode.
+    #   (3) No --config-path and no embedded config → error with a clear message.
+    #
+    # Rationale: a correctly-recorded episode carries its own hardware snapshot,
+    # so replay on the original machine is zero-config. The user only needs to
+    # override when replaying on a different machine (e.g. different CAN channel
+    # names) or for legacy episodes that predate embedded configs.
     embedded_robot_configs = episode_data.get("metadata", {}).get("robot_configs")
-    if embedded_robot_configs:
-        logger.info("Using robot_configs from episode metadata ({} arms)", len(embedded_robot_configs))
-        robots_cfg: Dict[str, Any] = embedded_robot_configs
-    else:
-        if not config_path:
-            logger.error(
-                "Episode metadata has no 'robot_configs' and no --config-path was provided. "
-                "Re-record the episode or pass --config-path to replay."
+
+    if config_path:
+        if embedded_robot_configs:
+            logger.warning(
+                "--config-path provided; overriding robot_configs embedded in episode metadata"
             )
-            return
-        logger.warning("Episode metadata missing 'robot_configs'; falling back to --config-path")
+        else:
+            logger.info("Using robot config from --config-path (legacy episode, no embedded config)")
         configs_dict = DictLoader.load(list(config_path))
         configs_dict.pop("agent", None)
         configs_dict.pop("sensors", None)
@@ -159,7 +166,19 @@ def replay_episode(
         configs_dict.pop("collection", None)
         configs_dict.pop("recording", None)
         main_config = instantiate(configs_dict)
-        robots_cfg = main_config.robots
+        robots_cfg: Dict[str, Any] = main_config.robots
+    elif embedded_robot_configs:
+        logger.info(
+            "Using robot_configs from episode metadata ({} arm(s))", len(embedded_robot_configs)
+        )
+        robots_cfg = embedded_robot_configs
+    else:
+        logger.error(
+            "This episode has no robot_configs in its metadata.json and no --config-path was "
+            "provided. Either re-record the episode on a current limb build (which embeds the "
+            "config automatically), or pass --config-path <robot_config.yaml>."
+        )
+        return
 
     original_sigint = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, _sigint_handler)
