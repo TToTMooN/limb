@@ -119,13 +119,19 @@ def build_state_names(arm_names: List[str], episode: Dict) -> List[str]:
 
 
 def build_action_names(arm_names: List[str], episode: Dict) -> List[str]:
-    """Build human-readable names for action vector dimensions."""
+    """Build human-readable names for action vector dimensions.
+
+    Uses the same joint/gripper convention as state names so the 1:1
+    alignment between state[i] and action[i] is obvious to downstream users.
+    """
     names = []
     for arm_name in arm_names:
         if "actions" in episode["arms"][arm_name] and "pos" in episode["arms"][arm_name]["actions"]:
             n_dims = episode["arms"][arm_name]["actions"]["pos"].shape[1]
-            for j in range(n_dims):
-                names.append(f"{arm_name}_action_{j}")
+            n_joints = n_dims - 1
+            for j in range(n_joints):
+                names.append(f"{arm_name}_joint_{j}")
+            names.append(f"{arm_name}_gripper")
     return names
 
 

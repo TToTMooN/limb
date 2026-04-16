@@ -162,7 +162,7 @@ Marking just creates/removes a `SUCCESS` marker file in the episode directory �
 
 ## `limb convert-lerobot`
 
-Convert a session of raw recordings into LeRobot v2.1 dataset format. No `lerobot` package dependency — only uses `pyarrow`.
+Convert a session of raw recordings into LeRobot v3.0 dataset format. No `lerobot` package dependency — only uses `pyarrow` and `pandas`.
 
 ```bash
 uv run limb convert-lerobot \
