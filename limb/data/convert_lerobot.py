@@ -313,6 +313,20 @@ def main(args: Args) -> None:
     with open(meta_dir / "info.json", "w") as f:
         json.dump(info, f, indent=2)
 
+    # --- Write README.md dataset card ---
+    _write_dataset_card(
+        output_dir,
+        task=task,
+        robot_type=args.robot_type,
+        n_episodes=n_episodes,
+        total_frames=total_frames,
+        fps=args.fps,
+        cam_names=cam_names,
+        state_names=state_names,
+        action_names=action_names,
+        detected_codec=detected_codec,
+    )
+
     logger.info("=" * 50)
     logger.info("LeRobot v3.0 dataset written to: {}", output_dir)
     logger.info("  Episodes: {}, Total frames: {}", n_episodes, total_frames)
@@ -322,6 +336,106 @@ def main(args: Args) -> None:
 
     if args.push_to_hub:
         _push_to_hub(output_dir, args.push_to_hub)
+
+
+def _write_dataset_card(
+    output_dir: Path,
+    *,
+    task: str,
+    robot_type: str,
+    n_episodes: int,
+    total_frames: int,
+    fps: int,
+    cam_names: List[str],
+    state_names: List[str],
+    action_names: List[str],
+    detected_codec: str,
+) -> None:
+    """Generate a HuggingFace dataset card (README.md) for the converted dataset."""
+    state_dim = len(state_names)
+    action_dim = len(action_names)
+
+    state_table = "\n".join(
+        f"| {i} | `{name}` |" for i, name in enumerate(state_names)
+    )
+    action_table = "\n".join(
+        f"| {i} | `{name}` |" for i, name in enumerate(action_names)
+    )
+    cam_list = "\n".join(f"| `{c}` |" for c in cam_names)
+
+    card = f"""---
+license: apache-2.0
+task_categories:
+  - robotics
+tags:
+  - LeRobot
+  - {robot_type}
+  - teleop
+  - manipulation
+configs:
+  - config_name: default
+    data_files: data/**/*.parquet
+---
+
+# {output_dir.name}
+
+Teleoperation dataset: **{task}**
+
+Collected with [limb](https://github.com/TToTMooN/limb) on {robot_type} arms.
+
+## Dataset summary
+
+| Field | Value |
+|-------|-------|
+| Robot | {robot_type} |
+| Episodes | {n_episodes} |
+| Total frames | {total_frames:,} |
+| FPS | {fps} Hz |
+| Task | {task} |
+| Format | LeRobot v3.0 |
+
+## Cameras
+
+| Name |
+|------|
+{cam_list}
+
+Video codec: {detected_codec}.
+
+## State space (`observation.state`, shape `[{state_dim}]`)
+
+| Index | Name |
+|-------|------|
+{state_table}
+
+## Action space (`action`, shape `[{action_dim}]`)
+
+| Index | Name |
+|-------|------|
+{action_table}
+
+State and action are 1:1 index-aligned.
+
+> **Note:** Gripper dimensions may use different units between state (raw motor
+> radians) and action (teleoperator command space). The robot's JointMapper
+> rescales between these at command time. Left and right grippers may also have
+> different value ranges if the physical hardware travel differs.
+
+## Usage
+
+```python
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+ds = LeRobotDataset("<repo_id>")
+print(ds.num_episodes, ds.num_frames, ds[0]["observation.state"].shape)
+```
+
+## License
+
+Apache 2.0
+"""
+    (output_dir / "README.md").write_text(card)
+    logger.info("Dataset card written: {}", output_dir / "README.md")
 
 
 def _push_to_hub(dataset_dir: Path, repo_id: str) -> None:
