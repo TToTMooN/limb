@@ -206,7 +206,7 @@ Opens the [Rerun](https://rerun.io) viewer with a timeline scrubber. Per-joint p
 
 ### Convert to LeRobot Format
 
-Convert a session (directory of episodes) to [LeRobot v2.1](https://github.com/huggingface/lerobot) dataset format. No `lerobot` dependency required — only uses pyarrow:
+Convert a session (directory of episodes) to [LeRobot v3.0](https://github.com/huggingface/lerobot) dataset format. No `lerobot` dependency required — only uses pyarrow + pandas:
 
 ```bash
 # Convert all episodes in a session
