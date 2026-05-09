@@ -42,7 +42,7 @@ agent:
 
   inner_policy:
     _target_: limb.agents.replay_agent.EpisodeReplayAgent
-    episode_dir: "recordings/REPLACE_ME/episode_REPLACE_ME"
+    episode_dir: "/home/benyang/limb/recordings/place_the_vial_into_the_stand_combined2_flat/episode_20260507_185313_0002"
     on_end: "hold"            # "hold" | "loop" | "stop"
     # arm_keys: [left, right] # optional: restrict to a subset of arms
 

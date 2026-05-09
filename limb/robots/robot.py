@@ -20,6 +20,7 @@ ROBOT_PROTOCOL_METHODS = {
     "move_joints": False,
     "zero_torque_mode": False,
     "position_mode": False,
+    "damped_compliant_mode": False,
     "soft_release": False,
 }
 

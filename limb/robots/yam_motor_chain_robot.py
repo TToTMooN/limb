@@ -9,7 +9,7 @@ import time
 from typing import Optional, Sequence
 
 import numpy as np
-from i2rt.robots.motor_chain_robot import MotorChainRobot
+from i2rt.robots.motor_chain_robot import JointCommands, MotorChainRobot
 
 
 class YamMotorChainRobot(MotorChainRobot):
@@ -68,6 +68,32 @@ class YamMotorChainRobot(MotorChainRobot):
         if self._gc_per_joint is not None:
             g = g * self._gc_per_joint
         return g
+
+    def damped_compliant_mode(self, kd_scale: float = 0.1) -> None:
+        """Backdriveable mode with viscous damping.
+
+        Sets ``kp=0`` (no position tracking) but ``kd = initial_kd * kd_scale``
+        so motion is opposed by velocity-proportional torque.  Gravity comp
+        remains active, so the arm floats; the operator can backdrive it
+        freely but ringing/overshoot is damped.
+
+        ``kd_scale`` is typically 0.05-0.20.  Tune by feel:
+            * too high  -> arm feels syrupy, hard to make small fast moves
+            * too low   -> ringing remains, overshoot on release
+
+        Used by :class:`DAggerAgent` during CORRECTING when
+        ``correcting_kd_scale > 0`` is set on the agent.  Pure
+        ``zero_torque_mode`` remains the default for backwards compatibility.
+        """
+        if kd_scale < 0:
+            raise ValueError(f"kd_scale must be non-negative, got {kd_scale}")
+        logging.info(f"Entering damped_compliant_mode (kd_scale={kd_scale:.3f}) for {self}")
+        with self._command_lock:
+            # Same target reset as zero_torque_mode so any stale position
+            # target doesn't get servoed by the new (small but non-zero) Kd.
+            self._commands = JointCommands.init_all_zero(len(self.motor_chain))
+            self._kp = np.zeros(len(self.motor_chain))
+            self._kd = self._initial_kd * float(kd_scale)
 
     def position_mode(self) -> None:
         """Restore the PD gains saved at init.  Inverse of ``zero_torque_mode``.

@@ -543,6 +543,10 @@ def main(args: Args) -> None:
                 elif mode == "zero_torque":
                     logger.info(f"Initial mode for '{name}' -> zero_torque")
                     robot.zero_torque_mode()
+                elif mode == "compliant":
+                    kd_scale = float(entry.get("kd_scale", 0.1))
+                    logger.info(f"Initial mode for '{name}' -> compliant (kd_scale={kd_scale:.3f})")
+                    robot.damped_compliant_mode(kd_scale)
                 else:
                     logger.warning(f"Unknown initial mode '{mode}' for '{name}' — ignoring")
             except Exception as e:
