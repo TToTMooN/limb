@@ -1,0 +1,28 @@
+# DAgger SENTRY (continuous) data collection overlay.
+#
+# Combine with a DAgger teleop config.  Recording runs continuously from
+# session start; episodes rotate every `episode_duration_s` seconds, with
+# rotation deferred while a correction is active so episode boundaries
+# always land on a clean autonomous frame.  Each saved frame has its own
+# `intervention` flag, so downstream training can filter on it.
+#
+# Usage:
+#   uv run limb record \
+#     --config-path configs/yam_dagger_bimanual.yaml \
+#                   configs/dagger_collection_sentry.yaml
+#
+# Stop with Ctrl+C — the in-progress episode is flushed in close().
+
+collection:
+  _target_: limb.recording.dagger_session.DAggerCollectionSession
+  num_episodes: 0              # 0 = unlimited; stop with Ctrl+C
+  task_instruction: "sentry rollout"
+  record_autonomous: true
+  episode_duration_s: 300.0    # rotate ~ every 5 minutes
+  recorder:
+    _target_: limb.recording.episode_recorder.EpisodeRecorder
+    base_dir: "recordings"
+    recording_fps: 30
+    ee_frame_names:
+      left: "ee_link"
+      right: "ee_link"

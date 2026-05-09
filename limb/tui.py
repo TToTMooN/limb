@@ -26,6 +26,11 @@ class SessionState:
     episodes_discarded: int = 0
     task_instruction: str = ""
     controls_hint: str = ""
+    # DAgger-only fields (None / 0 for non-DAgger sessions)
+    dagger_phase: Optional[str] = None  # "autonomous" / "paused" / "correcting"
+    dagger_intervention: bool = False  # current tick's intervention flag
+    dagger_intervention_count: int = 0  # interventions in current episode
+    dagger_total_ticks: int = 0  # total ticks recorded in current episode
 
 
 @dataclass
@@ -43,6 +48,7 @@ class StatusDisplay:
     _hz: float = field(default=0.0, init=False, repr=False)
     _step: int = field(default=0, init=False, repr=False)
     _session: Optional[SessionState] = field(default=None, init=False, repr=False)
+    _standalone_phase: Optional[str] = field(default=None, init=False, repr=False)
 
     def start(self) -> None:
         """Start the Live panel and reroute loguru through Rich console."""
@@ -99,6 +105,17 @@ class StatusDisplay:
         self._step = step
         self._refresh()
 
+    def update_phase(self, phase: Optional[str]) -> None:
+        """Set the standalone DAgger phase string shown in the panel.
+
+        Used when no DataCollectionSession is active (e.g. teleop without
+        recording) so the operator can still see AUTONOMOUS / PAUSED /
+        CORRECTING.  When a session *is* active, its SessionState push
+        takes precedence.
+        """
+        self._standalone_phase = phase
+        self._refresh()
+
     def update_session(self, state: SessionState) -> None:
         """Update session state and refresh the panel."""
         self._session = state
@@ -139,7 +156,33 @@ class StatusDisplay:
                 task_display = task_display[:67] + "..."
             lines.append(f"Task: {task_display}")
 
-        # Line 3: controls hint
+        # Line 3: DAgger phase (and intervention rate when a session is active).
+        # Session-pushed state takes precedence; otherwise fall back to the
+        # standalone phase plumbed from launch.py.
+        phase_str: Optional[str] = None
+        if s is not None and s.dagger_phase is not None:
+            phase_str = s.dagger_phase
+        elif self._standalone_phase is not None:
+            phase_str = self._standalone_phase
+
+        if phase_str is not None:
+            lines.append("\n")
+            phase_label = phase_str.upper()
+            color = {
+                "AUTONOMOUS": "cyan",
+                "PAUSED": "yellow",
+                "CORRECTING": "magenta",
+            }.get(phase_label, "white")
+            lines.append("phase: ", style="dim")
+            lines.append(phase_label, style=f"bold {color}")
+            if s is not None and s.dagger_total_ticks > 0:
+                pct = 100.0 * s.dagger_intervention_count / s.dagger_total_ticks
+                lines.append(
+                    f"   interventions {s.dagger_intervention_count}/{s.dagger_total_ticks} ({pct:.1f}%)",
+                    style="dim",
+                )
+
+        # Line 4: controls hint
         if s is not None and s.controls_hint:
             lines.append("\n")
             lines.append(s.controls_hint)

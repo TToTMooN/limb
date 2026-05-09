@@ -133,6 +133,21 @@ class YamPolicyAgent(PolicyAgent):
 
         return self.action_transform(flat_action)
 
+    @remote()
+    def reset(self) -> None:
+        """Clear any buffered action chunks and any pending observation.
+
+        Called by composite agents (e.g. DAggerAgent) when handing control back
+        to the policy after a takeover so stale chunks don't replay.  The
+        background inference thread will populate a fresh chunk on the next
+        observation.
+        """
+        self._chunk_mgr.reset()
+        with self._obs_lock:
+            self._latest_obs = None
+            self._step_counter = 0
+        logger.info("YamPolicyAgent reset (chunk buffer cleared)")
+
     @remote(serialization_needed=True)
     def action_spec(self) -> ActionSpec:
         spec = {}

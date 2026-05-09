@@ -1,0 +1,31 @@
+# DAgger CORRECTIONS-ONLY data collection overlay.
+#
+# Combine with a DAgger teleop config; each PAUSED -> CORRECTING -> PAUSED
+# correction window becomes one episode.  No keyboard / pedal needed for
+# recording start/stop — the phase trigger drives everything.
+#
+# Usage:
+#   uv run limb record \
+#     --config-path configs/yam_dagger_bimanual.yaml \
+#                   configs/dagger_collection.yaml
+#
+# Episode lifecycle:
+#   PAUSED -> CORRECTING : recorder.start_episode
+#   CORRECTING (any duration above min_correction_steps) : frames recorded
+#   CORRECTING -> PAUSED : recorder.stop_episode (saved with SUCCESS marker)
+#
+# Sessions stop after `num_episodes` corrections, or on Ctrl+C.
+
+collection:
+  _target_: limb.recording.dagger_session.DAggerCollectionSession
+  num_episodes: 25
+  task_instruction: "intervention demonstrations"
+  record_autonomous: false
+  min_correction_steps: 5      # discard ≤5-tick corrections (accidental taps)
+  recorder:
+    _target_: limb.recording.episode_recorder.EpisodeRecorder
+    base_dir: "recordings"
+    recording_fps: 30
+    ee_frame_names:
+      left: "ee_link"
+      right: "ee_link"

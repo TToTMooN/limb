@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 ObsPreprocess = Callable[[Dict[str, Any]], Dict[str, Any]]
 
@@ -40,6 +40,10 @@ from limb.visualization.viser_monitor import ViserMonitor
 SAFE_MOVE_DURATION_S = 1.0
 IK_WARMUP_TIMEOUT_S = 15.0
 IK_WARMUP_POLL_S = 0.1
+SLOW_STEP_WARN_S = 1.0
+SLOW_HZ_FRACTION = 0.8
+SLOW_HZ_STREAK_S = 3
+SLOW_HZ_REPEAT_S = 10
 
 _shutdown_requested = False
 
@@ -169,12 +173,64 @@ class LaunchConfig:
     collection: Optional[Dict[str, Any]] = None  # DataCollectionSession config (managed episodes)
     sim_mode: bool = False  # skip CAN/sensors, instantiate robots & agent in-process
     enable_monitor: bool = True  # launch ViserMonitor for camera feeds + recording
+    # Robots placed in zero_torque_mode immediately after init -- typically the
+    # operator-backdriven leader arms in a bilateral / DAgger setup.  These
+    # robots are also excluded from the "return to startup pose" shutdown step.
+    release_at_startup: List[str] = field(default_factory=list)
 
 
 @dataclass
 class Args:
     config_path: Tuple[str, ...] = ("~/yam_realtime/configs/yam_viser_bimanual.yaml",)
     log_level: str = "INFO"
+
+
+def _agent_query_bool(agent: Any, method_name: str) -> bool:
+    """Call ``agent.<method_name>()`` if exposed; return False otherwise.
+
+    Works for both in-process agents and Portal-RPC Client handles.  A Client
+    raises AttributeError on unknown methods (no falling back to attr lookup),
+    so we introspect ``supported_remote_methods`` first.  In-process agents
+    don't have that attribute; we fall back to a normal hasattr check.
+    """
+    rpc_methods = getattr(agent, "supported_remote_methods", None)
+    if rpc_methods is not None:
+        if method_name in rpc_methods:
+            try:
+                return bool(getattr(agent, method_name)())
+            except Exception:
+                return False
+        return False
+    method = getattr(agent, method_name, None)
+    if method is None:
+        return False
+    if callable(method):
+        try:
+            return bool(method())
+        except Exception:
+            return False
+    return bool(method)
+
+
+def _agent_query_str(agent: Any, method_name: str) -> Optional[str]:
+    """Like _agent_query_bool but for string-returning methods (e.g. phase_name)."""
+    rpc_methods = getattr(agent, "supported_remote_methods", None)
+    if rpc_methods is not None:
+        if method_name in rpc_methods:
+            try:
+                return str(getattr(agent, method_name)())
+            except Exception:
+                return None
+        return None
+    method = getattr(agent, method_name, None)
+    if method is None:
+        return None
+    if callable(method):
+        try:
+            return str(method())
+        except Exception:
+            return None
+    return str(method)
 
 
 def _save_robot_positions(obs: Observation, robot_names: list) -> Dict[str, np.ndarray]:
@@ -399,6 +455,18 @@ def main(args: Args) -> None:
         logger.info("Initializing robots...")
         robots = initialize_robots(main_config.robots, server_processes)
 
+        # Release any operator-backdriven robots (e.g. leader arms in a
+        # bilateral / DAgger setup) before the control loop touches them.
+        for name in main_config.release_at_startup:
+            if name not in robots:
+                logger.warning(f"release_at_startup: '{name}' is not in robots {list(robots.keys())}, skipping")
+                continue
+            try:
+                logger.info(f"Releasing '{name}' (zero_torque_mode) per release_at_startup")
+                robots[name].zero_torque_mode()
+            except Exception as e:
+                logger.warning(f"Could not release '{name}': {e}")
+
         agent = initialize_agent(agent_cfg, server_processes)
 
         # Create a standalone ViserMonitor for agents that don't have their own
@@ -431,6 +499,12 @@ def main(args: Args) -> None:
 
         # --- Safe startup ---
         obs = env.reset()
+        # Save the pose of every arm at reset.  Followers will be commanded
+        # back to their saved pose at shutdown via _safe_move_robots; released
+        # robots (leaders) are *also* returned to their saved pose, after a
+        # position_mode call that restores their PD gains.  Skipping
+        # release_at_startup robots from this dict caused leaders to free-fall
+        # during the shutdown soft_release ramp.
         saved_positions = _save_robot_positions(obs, list(robots.keys()))
         logger.info(f"Saved pre-teleop positions for: {list(saved_positions.keys())}")
         logger.info(f"Action spec: {env.action_spec()}")
@@ -450,6 +524,29 @@ def main(args: Args) -> None:
             if obs_preprocess is not None:
                 initial_obs = obs_preprocess(initial_obs)
             initial_action = agent.act(initial_obs)
+
+        # Apply any robot mode-switches the agent emitted on its first tick
+        # (e.g. DAgger's leaders need position_mode before the safe-move so the
+        # PD gains are restored — _safe_move_robots calls robot.move_joints
+        # directly, bypassing env.step / _apply_action where modes normally land).
+        for name, entry in initial_action.items():
+            if not isinstance(entry, dict) or "mode" not in entry:
+                continue
+            robot = robots.get(name)
+            if robot is None:
+                continue
+            mode = entry["mode"]
+            try:
+                if mode == "position":
+                    logger.info(f"Initial mode for '{name}' -> position (restoring PD gains)")
+                    robot.position_mode()
+                elif mode == "zero_torque":
+                    logger.info(f"Initial mode for '{name}' -> zero_torque")
+                    robot.zero_torque_mode()
+                else:
+                    logger.warning(f"Unknown initial mode '{mode}' for '{name}' — ignoring")
+            except Exception as e:
+                logger.warning(f"Could not apply initial mode '{mode}' to '{name}': {e}")
 
         initial_targets = {}
         for name in robots:
@@ -501,6 +598,20 @@ def main(args: Args) -> None:
         # prevented the signal from killing them.
         if saved_positions and robots:
             try:
+                # Released robots are in zero_torque_mode (kp=kd=0).  Restore
+                # PD gains before move-back so move_joints can actually drive
+                # them; position_mode also seeds the command target with the
+                # current pose so the PD doesn't lurch toward a stale (zero)
+                # target.
+                for name in main_config.release_at_startup:
+                    if name not in robots:
+                        continue
+                    try:
+                        logger.info(f"Restoring PD gains on '{name}' (position_mode) before park-pose move")
+                        robots[name].position_mode()
+                    except Exception as e:
+                        logger.warning(f"position_mode failed for '{name}': {e}")
+
                 logger.info("Returning to pre-teleop positions (safe slow motion)...")
                 _safe_move_robots(robots, saved_positions)
                 _safe_release_robots(robots)
@@ -617,29 +728,81 @@ def _run_control_loop(
     steps = 0
     start_time = time.time()
     loop_count = 0
+    slow_hz_streak = 0  # consecutive 1-second windows below SLOW_HZ_FRACTION * target
+    # Track DAgger phase across ticks so we can log edges from the *main*
+    # process (the TUI's Rich-aware sink) instead of relying on the agent
+    # subprocess's stderr which can be clobbered by Live-panel redraws.
+    last_phase_seen: Optional[str] = None
 
     obs = env.reset()
 
+    # Per-iteration timings for stages OUTSIDE env.step (which has its own
+    # last_step_timing). Merged into the slow-Hz warning so unmeasured
+    # stages — agent RPC, recorder, monitor — show up in the breakdown.
+    extra_timing: Dict[str, float] = {}
+
     while not _shutdown_requested:
+        t_iter_start = time.perf_counter()
+
+        t0 = time.perf_counter()
         obs_dict = obs.to_dict()
+        # PR #10: pre-resize obs images on this side of the Portal RPC so the
+        # payload to the agent process is ~12x smaller for typical 3-cam policy
+        # configs. No-op when the agent has no obs_transform.image_size.
         if obs_preprocess is not None:
             obs_dict = obs_preprocess(obs_dict)
-        with Timeout(30, "Agent action"):
-            action = agent.act(obs_dict)
+        extra_timing["obs_to_dict"] = time.perf_counter() - t0
 
-        # Data collection session manages recording + trigger signals
+        with Timeout(30, "Agent action"):
+            t0 = time.perf_counter()
+            action = agent.act(obs_dict)
+            extra_timing["agent.act"] = time.perf_counter() - t0
+
+        # Data collection session manages recording + trigger signals.
+        # `intervention` is True iff the agent reports it just emitted an
+        # operator-correction action (DAgger).  Non-DAgger agents do not
+        # expose is_correcting; the helper returns False and recordings
+        # behave identically to before this flag existed.
+        intervention = _agent_query_bool(agent, "is_correcting")
+        phase = _agent_query_str(agent, "phase_name")
+        # Edge-log phase changes from the main process so they go through the
+        # TUI's Rich sink (subprocess stderr can be clobbered by Live redraws).
+        if phase is not None and phase != last_phase_seen:
+            if last_phase_seen is not None:
+                logger.info("DAgger phase: {} -> {}", last_phase_seen, phase)
+            last_phase_seen = phase
+            # Mirror to the TUI panel so the operator can see the current
+            # phase even when no session is providing SessionState.
+            if display is not None and session is None:
+                display.update_phase(phase)
+        t0 = time.perf_counter()
         if session is not None:
-            if not session.step(obs, action):
+            if not session.step(obs, action, intervention=intervention, phase=phase):
                 break  # session complete or quit signal
+            extra_timing["session.step"] = time.perf_counter() - t0
         elif recorder is not None and recorder.is_recording:
             # Standalone recorder: record pre-step (s_t, a_t)
-            recorder.record(obs, action)
+            recorder.record(obs, action, intervention=intervention)
+            extra_timing["recorder.record"] = time.perf_counter() - t0
 
-        with Timeout(1, "Env step", "warning"):
-            obs = env.step(action)
+        t_step_start = time.perf_counter()
+        obs = env.step(action)
+        step_duration = time.perf_counter() - t_step_start
 
+        if step_duration > SLOW_STEP_WARN_S:
+            timing = getattr(env, "last_step_timing", {})
+            top = sorted(timing.items(), key=lambda kv: -kv[1])[:5]
+            breakdown = ", ".join(f"{k}={v * 1000:.0f}ms" for k, v in top) or "no timing data"
+            logger.warning(
+                f"Env step took {step_duration * 1000:.0f}ms (>{SLOW_STEP_WARN_S * 1000:.0f}ms): {breakdown}"
+            )
+
+        t0 = time.perf_counter()
         if monitor is not None:
             monitor.update(obs)
+        extra_timing["monitor.update"] = time.perf_counter() - t0
+
+        extra_timing["iter_total"] = time.perf_counter() - t_iter_start
 
         steps += 1
         loop_count += 1
@@ -649,6 +812,27 @@ def _run_control_loop(
             hz = loop_count / elapsed_time
             if display is not None:
                 display.update_loop(hz, steps)
+            target_hz = config.hz
+            if target_hz and hz < target_hz * SLOW_HZ_FRACTION:
+                slow_hz_streak += 1
+                # Log on entry to slow state and every SLOW_HZ_REPEAT_S after,
+                # not every second — and include the last step's breakdown so
+                # the warning is actually actionable.
+                if slow_hz_streak == SLOW_HZ_STREAK_S or (
+                    slow_hz_streak > SLOW_HZ_STREAK_S and (slow_hz_streak - SLOW_HZ_STREAK_S) % SLOW_HZ_REPEAT_S == 0
+                ):
+                    timing = dict(getattr(env, "last_step_timing", {}))
+                    timing.update(extra_timing)
+                    iter_total = timing.pop("iter_total", None)
+                    top = sorted(timing.items(), key=lambda kv: -kv[1])[:8]
+                    breakdown = ", ".join(f"{k}={v * 1000:.1f}ms" for k, v in top) or "no timing data"
+                    iter_str = f" iter_total={iter_total * 1000:.1f}ms," if iter_total is not None else ""
+                    logger.warning(
+                        f"Loop at {hz:.1f} Hz (target {target_hz:.1f} Hz) for {slow_hz_streak}s.{iter_str} "
+                        f"Last step stages: {breakdown}"
+                    )
+            else:
+                slow_hz_streak = 0
             start_time = time.time()
             loop_count = 0
 
