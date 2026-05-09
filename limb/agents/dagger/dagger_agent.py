@@ -76,6 +76,12 @@ class DAggerAgent(Agent):
     # Typical values: 0.05 - 0.20.  See YamMotorChainRobot.damped_compliant_mode.
     correcting_kd_scale: float = 0.0
 
+    # On CORRECTING -> PAUSED, optionally re-stiffen the leader at its current
+    # observed pose so it holds in place instead of staying limp / drifting
+    # under residual gravity-comp imbalance.  Makes PAUSED a uniform
+    # "everything frozen" state regardless of which phase you came from.
+    pause_stiffens_leader: bool = True
+
     use_joint_state_as_action: bool = False
 
     def __post_init__(self) -> None:
@@ -234,6 +240,15 @@ class DAggerAgent(Agent):
                 }
             else:
                 self._leader_mode_payload = {"mode": "zero_torque"}
+
+        elif old_phase is DAggerPhase.CORRECTING and new_phase is DAggerPhase.PAUSED and self.pause_stiffens_leader:
+            # Re-stiffen the leader at its current observed pose so it doesn't
+            # drift while the operator decides what to do next.  position_mode
+            # seeds the command target with the current pose, so there is no
+            # snap toward a stale target — at most a small "click" if the
+            # operator is still gripping the leader at the moment of the
+            # transition.
+            self._leader_mode_payload = {"mode": "position"}
 
         elif new_phase is DAggerPhase.AUTONOMOUS:
             # Coming back from PAUSED.  Stale chunks from before the takeover
