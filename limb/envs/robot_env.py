@@ -70,6 +70,9 @@ class RobotEnv(dm_env.Environment):
                     robot.zero_torque_mode()
                 elif mode == "position":
                     robot.position_mode()
+                elif mode == "compliant":
+                    kd_scale = float(action.get("kd_scale", 0.1))
+                    robot.damped_compliant_mode(kd_scale)
                 else:
                     logger.warning(f"Unknown mode '{mode}' for robot '{name}' — ignoring")
 
