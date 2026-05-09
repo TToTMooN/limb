@@ -8,16 +8,27 @@ else
     SUDO=""
 fi
 
-# Check if a CAN interface is already up with the correct bitrate
+# Check if a CAN interface is already up with the correct bitrate AND not wedged.
+# A bus that's UP but in BUS-OFF / ERROR-PASSIVE state will silently drop frames;
+# we need to bounce it in that case.
 is_can_ok() {
     local iface=$1
-    # Interface must be UP and have the right bitrate
-    if ip link show "$iface" 2>/dev/null | grep -q "UP"; then
-        if ip -details link show "$iface" 2>/dev/null | grep -q "bitrate $BITRATE"; then
-            return 0
-        fi
+    if ! ip link show "$iface" 2>/dev/null | grep -q "UP"; then
+        return 1
     fi
-    return 1
+    if ! ip -details link show "$iface" 2>/dev/null | grep -q "bitrate $BITRATE"; then
+        return 1
+    fi
+    # ERROR-ACTIVE = healthy.  Anything else (ERROR-WARNING / ERROR-PASSIVE / BUS-OFF
+    # / STOPPED) means the controller has been seeing TX/RX errors and needs a reset
+    # to recover.  Match these states explicitly to avoid colliding with the netdev
+    # "state UP" line that also appears in `ip` output.
+    if ip -details link show "$iface" 2>/dev/null \
+        | grep -qE "(BUS-OFF|ERROR-PASSIVE|ERROR-WARNING|STOPPED)"; then
+        echo "CAN interface $iface is in a degraded controller state — will reset."
+        return 1
+    fi
+    return 0
 }
 
 # Function to reset a CAN interface

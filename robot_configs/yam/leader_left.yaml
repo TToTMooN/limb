@@ -1,0 +1,24 @@
+# Overlay over robot_configs/yam/left.yaml for a left-side LEADER arm in a
+# 4-YAM bilateral setup.  Loaded as the second entry in a `robots:` list:
+#
+#   leader_left: ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_left.yaml"]
+#
+# The leader is mechanically identical to the follower (same calibration,
+# same kinematics), so only fields that *differ* from left.yaml are listed
+# here -- primarily the CAN bus channel.  Adjust ``channel`` to whatever
+# CAN interface your leader arm is wired to.  ``reset_all_can.sh`` will
+# bring up any interface matching ``can*``.
+motor_chain:
+  channel: "can_leader_l"
+  motor_chain_name: "yam_leader_left"
+# Log motor temperatures so we can debug thermal-cutoff drops (visible in obs as temp_rotor).
+temp_record_flag: true
+# Leader runs in zero_torque_mode + gravity comp.  Global factor is the
+# baseline applied to every joint.  Per-joint scale multiplies on top of
+# that, so the effective comp on joint i is:
+#     g[i] * gravity_comp_per_joint_scale[i] * gravity_comp_factor
+# Joint 4 sags under its own weight, so we boost it specifically rather
+# than lifting the global factor (which would heat up motors 1-3 too).
+# Order: [j1, j2, j3, j4, j5, j6, gripper].  Gripper slot is ignored (g=0).
+gravity_comp_factor: 1.0
+gravity_comp_per_joint_scale: [1.0, 1.0, 1.2, 1.35, 1.0, 1.0, 1.0]

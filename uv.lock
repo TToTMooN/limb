@@ -1851,7 +1851,6 @@ dependencies = [
     { name = "pyrealsense2" },
     { name = "pyzed" },
     { name = "tyro" },
-    { name = "viser" },
 ]
 
 [package.metadata]
@@ -1863,7 +1862,6 @@ requires-dist = [
     { name = "pyrealsense2" },
     { name = "pyzed", url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" },
     { name = "tyro" },
-    { name = "viser" },
 ]
 
 [[package]]

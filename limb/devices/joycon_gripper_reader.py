@@ -70,6 +70,7 @@ class JoyConGripperReader:
         gripper_close: float = 2.4,
         stick_speed: float = 3.0,
         deadzone: float = 0.05,
+        proportional: bool = True,
     ) -> None:
         self._open = gripper_open
         self._close = gripper_close
@@ -77,6 +78,7 @@ class JoyConGripperReader:
         self._hi = max(gripper_open, gripper_close)
         self._stick_speed = stick_speed
         self._deadzone = deadzone
+        self._proportional = proportional
 
         self._lock = threading.Lock()
         self._left_gripper = gripper_open
@@ -88,10 +90,11 @@ class JoyConGripperReader:
         self._left_thread.start()
         self._right_thread.start()
         logger.info(
-            "JoyConGripperReader started (range %.1f–%.1f, speed %.1f/s)",
+            "JoyConGripperReader started (range %.1f–%.1f, speed %.1f/s, proportional=%s)",
             self._lo,
             self._hi,
             self._stick_speed,
+            self._proportional,
         )
 
     # ------------------------------------------------------------------
@@ -159,7 +162,7 @@ class JoyConGripperReader:
                             elif event.type == ecodes.EV_KEY and event.code == toggle_code and event.value == 1:
                                 self._toggle(side)
 
-                    if abs(stick_norm) > 0:
+                    if self._proportional and abs(stick_norm) > 0:
                         delta = stick_norm * self._stick_speed * dt
                         self._update_velocity(side, delta)
             except Exception as exc:
