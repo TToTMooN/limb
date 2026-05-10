@@ -82,13 +82,52 @@ class ObsTransform:
         return result
 
 
+def _resize_with_pad(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    """Aspect-preserving resize + black-pad to (target_h, target_w). Pure numpy + cv2.
+
+    Mirrors openpi_client.image_tools.resize_with_pad so we don't pull in openpi_client
+    just for one helper.
+    """
+    h, w = img.shape[:2]
+    if h == target_h and w == target_w:
+        return img
+    scale = min(target_h / h, target_w / w)
+    new_h, new_w = int(round(h * scale)), int(round(w * scale))
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    pad_top = (target_h - new_h) // 2
+    pad_bot = target_h - new_h - pad_top
+    pad_left = (target_w - new_w) // 2
+    pad_right = target_w - new_w - pad_left
+    return cv2.copyMakeBorder(resized, pad_top, pad_bot, pad_left, pad_right, cv2.BORDER_CONSTANT, value=0)
+
+
 @dataclass
 class OpenPIObsTransform:
-    """Transform limb observations into OpenPI's expected flat-dict format.
+    """Transform limb observations into OpenPI's expected obs format.
 
-    OpenPI expects a flat dict with keys like "left_camera-images-rgb"
-    for images and "state" for the concatenated proprioceptive state.
-    Images must be (3, H, W) uint8 with padded resize.
+    OpenPI's input transforms (AlohaInputs, LiberoInputs, DroidInputs, …) all read
+    images from ``data["images"][<server_name>]``, NOT from top-level keys. Image
+    tensors must be (3, H, W) uint8 with aspect-preserving padded resize.
+
+    Image server-side names depend on the model's input policy:
+      • AlohaInputs (pi0/pi0.5 aloha-style):  cam_high / cam_left_wrist / cam_right_wrist
+      • LiberoInputs:                          image / wrist_image
+      • DroidInputs:                           exterior_image_1_left / wrist_image_left
+
+    Parameters
+    ----------
+    state_keys : list of str
+        Flattened observation keys to concatenate into the "state" vector.
+    image_keys : dict mapping server_name -> obs_key
+        Maps the server's expected image name to the flattened limb obs key.
+        Example: {"cam_high": "head_camera-images-rgb",
+                  "cam_left_wrist": "left_wrist_camera-images-rgb",
+                  "cam_right_wrist": "right_wrist_camera-images-rgb"}
+    image_size : (height, width)
+        Target image resolution for the model.
+    prompt : str or None
+        Language instruction sent under the "prompt" key on every observation.
+        Required for VLA models (pi0, pi0.5, X-VLA, SmolVLA).
     """
 
     state_keys: List[str] = field(
@@ -99,14 +138,15 @@ class OpenPIObsTransform:
             "right-gripper_pos",
         ]
     )
-    image_keys: List[str] = field(
-        default_factory=lambda: [
-            "left_wrist_camera-images-rgb",
-            "right_wrist_camera-images-rgb",
-            "head_camera-images-rgb",
-        ]
+    image_keys: Dict[str, str] = field(
+        default_factory=lambda: {
+            "cam_high": "head_camera-images-rgb",
+            "cam_left_wrist": "left_wrist_camera-images-rgb",
+            "cam_right_wrist": "right_wrist_camera-images-rgb",
+        }
     )
     image_size: Tuple[int, int] = (224, 224)
+    prompt: Optional[str] = None
 
     def __call__(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         flat = _recursive_flatten(obs)
@@ -114,18 +154,22 @@ class OpenPIObsTransform:
         state_parts = [flat[k] for k in self.state_keys]
         state = np.concatenate(state_parts, axis=-1).astype(np.float32)
 
-        from openpi_client import image_tools
-
         h, w = self.image_size
-        result: Dict[str, Any] = {"state": state}
-        for key in self.image_keys:
-            if key not in flat:
+        images: Dict[str, np.ndarray] = {}
+        for server_name, obs_key in self.image_keys.items():
+            if obs_key not in flat:
                 continue
-            img = flat[key]
-            img = image_tools.convert_to_uint8(image_tools.resize_with_pad(img, h, w))
+            img = flat[obs_key]
+            if img.dtype != np.uint8:
+                img = np.clip(img * 255, 0, 255).astype(np.uint8)
+            img = _resize_with_pad(img, h, w)
             img = np.transpose(img, (2, 0, 1))
-            result[key] = img
+            images[server_name] = img
 
+        # OpenPI input transforms (AlohaInputs etc.) read images from data["images"].
+        result: Dict[str, Any] = {"state": state, "images": images}
+        if self.prompt is not None:
+            result["prompt"] = self.prompt
         return result
 
 
