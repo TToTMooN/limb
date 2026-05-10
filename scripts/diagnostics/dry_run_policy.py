@@ -329,17 +329,24 @@ def main(args: Args) -> None:
         if rad_per_s > 10.0:
             logger.warning("  ⚠ Action stream changes faster than 10 rad/s — robot will shake under PD control.")
             n_warn += 1
-        # 2. Gripper range
+        # 2. Gripper clip range in YAML (truncates server output before it reaches the robot).
+        # We can't infer the right clip from a single dry-run — gripper may legitimately
+        # stay at 0 for the whole probe — so check the config value directly.
+        gripper_clip = at.get("gripper_clip") if isinstance(at, dict) else None
+        if gripper_clip is not None and len(gripper_clip) == 2:
+            lo, hi = gripper_clip
+            logger.info("ActionTransform.gripper_clip = [{}, {}]", lo, hi)
+            if hi < 2.0:
+                logger.warning(
+                    "  ⚠ gripper_clip[1]={} truncates anything > {}. "
+                    "YAM training-action gripper goes up to 2.4 — set gripper_clip: [0.0, 2.4].",
+                    hi, hi,
+                )
+                n_warn += 1
         for i, n in enumerate(action_names):
             if n.endswith("gripper"):
                 col = actions[:, i]
-                logger.info("{} commanded range: [{:+.3f}, {:+.3f}]", n, col.min(), col.max())
-                if col.max() <= 1.001 and col.min() >= -0.001:
-                    logger.warning(
-                        "  ⚠ {} stays in [0,1]. Training-action gripper goes up to 2.4 — "
-                        "ActionTransform.gripper_clip in YAML may be wrong (should be [0.0, 2.4]).", n,
-                    )
-                    n_warn += 1
+                logger.info("{} commanded range this run: [{:+.3f}, {:+.3f}]", n, col.min(), col.max())
         # 3. State vector dimension vs training (14 for bimanual YAM)
         if states.shape[1] != 14:
             logger.warning("  ⚠ State dim = {} (expected 14 for bimanual). Check state_keys order.", states.shape[1])
