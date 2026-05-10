@@ -103,12 +103,16 @@ def _resize_with_pad(img: np.ndarray, target_h: int, target_w: int) -> np.ndarra
 
 @dataclass
 class OpenPIObsTransform:
-    """Transform limb observations into OpenPI's expected flat-dict format.
+    """Transform limb observations into OpenPI's expected obs format.
 
-    OpenPI expects a flat dict at the top level with image keys named per the model's
-    input policy (e.g. ``cam_high``/``cam_left_wrist``/``cam_right_wrist`` for AlohaInputs,
-    or ``base_0_rgb``/``left_wrist_0_rgb``/``right_wrist_0_rgb`` for the underlying model).
-    Images must be (3, H, W) uint8 with aspect-preserving padded resize.
+    OpenPI's input transforms (AlohaInputs, LiberoInputs, DroidInputs, …) all read
+    images from ``data["images"][<server_name>]``, NOT from top-level keys. Image
+    tensors must be (3, H, W) uint8 with aspect-preserving padded resize.
+
+    Image server-side names depend on the model's input policy:
+      • AlohaInputs (pi0/pi0.5 aloha-style):  cam_high / cam_left_wrist / cam_right_wrist
+      • LiberoInputs:                          image / wrist_image
+      • DroidInputs:                           exterior_image_1_left / wrist_image_left
 
     Parameters
     ----------
@@ -151,7 +155,7 @@ class OpenPIObsTransform:
         state = np.concatenate(state_parts, axis=-1).astype(np.float32)
 
         h, w = self.image_size
-        result: Dict[str, Any] = {"state": state}
+        images: Dict[str, np.ndarray] = {}
         for server_name, obs_key in self.image_keys.items():
             if obs_key not in flat:
                 continue
@@ -160,8 +164,10 @@ class OpenPIObsTransform:
                 img = np.clip(img * 255, 0, 255).astype(np.uint8)
             img = _resize_with_pad(img, h, w)
             img = np.transpose(img, (2, 0, 1))
-            result[server_name] = img
+            images[server_name] = img
 
+        # OpenPI input transforms (AlohaInputs etc.) read images from data["images"].
+        result: Dict[str, Any] = {"state": state, "images": images}
         if self.prompt is not None:
             result["prompt"] = self.prompt
         return result
