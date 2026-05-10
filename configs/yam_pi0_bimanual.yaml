@@ -1,8 +1,18 @@
+# OpenPI policy server config (for pi0, pi0.5, pi0-FAST served via openpi/scripts/serve_policy.py).
+# Default targets a local server at 8111. Change `host` if remote.
+#
+# 3-camera setup. Comment out cameras you don't have.
+
 _target_: limb.envs.launch.LaunchConfig
 hz: 100.0
 
 sensors:
   cameras:
+    head_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "215122256240"
     left_wrist_camera:
         _target_: limb.sensors.cameras.camera.CameraNode
         camera:
@@ -13,11 +23,6 @@ sensors:
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
             serial_number: "409122274543"
-    # head_camera:
-    #     _target_: limb.sensors.cameras.camera.CameraNode
-    #     camera:
-    #         _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
-    #         serial_number: "215122256240"
 
 robots:
   left: ["robot_configs/yam/left.yaml"]
@@ -36,18 +41,21 @@ agent:
       - "left-gripper_pos"
       - "right-joint_pos"
       - "right-gripper_pos"
+    # Map server-side aloha-policy camera names to limb obs keys.
+    # AlohaInputs (used by all aloha-style pi0/pi0.5 finetunes) expects cam_high / cam_left_wrist / cam_right_wrist.
     image_keys:
-      - "left_wrist_camera-images-rgb"
-      - "right_wrist_camera-images-rgb"
-      # - "head_camera-images-rgb"
+      cam_high: "head_camera-images-rgb"
+      cam_left_wrist: "left_wrist_camera-images-rgb"
+      cam_right_wrist: "right_wrist_camera-images-rgb"
     image_size: [224, 224]
+    prompt: "place the vial into the stand"   # required for VLAs
   action_transform:
     _target_: limb.agents.policy_learning.transforms.ActionTransform
     arm_names: ["left", "right"]
     joints_per_arm: 7
     include_vel: false
     gripper_clip: [0.0, 1.0]
-  action_horizon: 25
+  action_horizon: 50    # pi0.5 default action_horizon
   smoothing_window: 4
   async_inference: true
 
