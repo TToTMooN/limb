@@ -68,7 +68,11 @@ agent:
     gripper_clip: [0.0, 2.4]
   action_horizon: 8     # FM/DP default; bump to 30 for X-VLA, 50 for pi0.5
   smoothing_window: 4
-  async_inference: true
+  # Sync inference: each act() blocks on a fresh chunk and the whole chunk is
+  # consumed before the next request. Avoids the async-replacement issue where
+  # a fast-inferring local server overwrites the buffer mid-consumption,
+  # turning the action stream into "first action of each new chunk" jitter.
+  async_inference: false
 
 recording:
   _target_: limb.recording.episode_recorder.EpisodeRecorder
