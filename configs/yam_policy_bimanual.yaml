@@ -7,7 +7,11 @@
 # black frames in their place (X-VLA tolerates via image_mask; FM/DP do not).
 
 _target_: limb.envs.launch.LaunchConfig
-hz: 100.0
+# Match the dataset fps the policy was trained on. Our YAM datasets are 30 fps;
+# running the control loop at 100 Hz (the teleop default) makes policy actions
+# play back ~3.3× faster than recorded. Verify by checking
+# `meta/info.json:fps` of the dataset that produced the checkpoint.
+hz: 30.0
 
 sensors:
   cameras:
@@ -58,7 +62,10 @@ agent:
     arm_names: ["left", "right"]
     joints_per_arm: 7
     include_vel: false
-    gripper_clip: [0.0, 1.0]
+    # YAM bimanual gripper position spans [0.0, 2.4] in the trained dataset
+    # (verify: meta/stats.json action.min[6]/max[6] for left, [13]/[13] for right).
+    # The default [0,1] would silently truncate "fully open" commands.
+    gripper_clip: [0.0, 2.4]
   action_horizon: 8     # FM/DP default; bump to 30 for X-VLA, 50 for pi0.5
   smoothing_window: 4
   async_inference: true

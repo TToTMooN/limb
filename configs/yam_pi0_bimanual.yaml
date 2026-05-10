@@ -4,7 +4,9 @@
 # 3-camera setup. Comment out cameras you don't have.
 
 _target_: limb.envs.launch.LaunchConfig
-hz: 100.0
+# Match the dataset fps the policy was trained on (YAM datasets are 30 fps).
+# The teleop default of 100 Hz would replay actions ~3.3× too fast.
+hz: 30.0
 
 sensors:
   cameras:
@@ -54,7 +56,8 @@ agent:
     arm_names: ["left", "right"]
     joints_per_arm: 7
     include_vel: false
-    gripper_clip: [0.0, 1.0]
+    # YAM gripper position spans [0, 2.4] (see meta/stats.json action.min/max).
+    gripper_clip: [0.0, 2.4]
   action_horizon: 50    # pi0.5 default action_horizon
   smoothing_window: 4
   async_inference: true
