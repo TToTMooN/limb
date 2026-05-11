@@ -52,12 +52,23 @@ all = [
     "robocam",
     "pyzed",
 ]
+# Install with `uv pip install -e '.[openpi]'` (or via `uv sync --extra openpi`)
+# when deploying against an OpenPI-protocol policy server (pi0, pi0.5, pi0-FAST
+# served by openpi/scripts/serve_policy.py). lobe-serve speaks both protocols,
+# so this extra is only needed for OpenPI's native server.
+openpi = [
+    "openpi-client",
+]
 [tool.uv.sources]
 i2rt = { path = "dependencies/i2rt", editable = true }
 # For local development, uncomment the path source and comment the git source:
 robocam = { path = "../robocam", editable = true }
 #robocam = { git = "https://github.com/TToTMooN/robocam.git" }
 pyzed = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
+# openpi-client is published only on the openpi repo, not PyPI. Point at the
+# packages/openpi-client subdir of an openpi checkout (path source — assumes a
+# sibling clone at ../openpi for local dev).
+openpi-client = { path = "../openpi/packages/openpi-client", editable = true }
 
 [tool.uv]
 
