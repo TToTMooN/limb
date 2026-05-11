@@ -28,7 +28,7 @@ _target_: limb.envs.launch.LaunchConfig
 # Match the dataset fps the policy was trained on. YAM datasets are 30 fps;
 # 60 Hz plays back closer to the original demo pace and gives the recorder
 # more leeway for capturing intervention edges precisely.
-hz: 60.0
+hz: 30.0
 
 sensors:
   cameras:
