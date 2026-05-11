@@ -41,11 +41,9 @@ class OpenPIClient:
         self._client: Any = None
 
     def connect(self) -> None:
-        # Uses the minimal vendored copy of openpi-client (see
-        # limb/vendor/openpi_client/NOTICE.md). No external dep needed.
-        from limb.vendor.openpi_client import WebsocketClientPolicy
+        from openpi_client import websocket_client_policy as wcp
 
-        self._client = WebsocketClientPolicy(host=self.host, port=self.port)
+        self._client = wcp.WebsocketClientPolicy(host=self.host, port=self.port)
         logger.info("OpenPIClient connected to {}:{}", self.host, self.port)
 
     def infer(self, obs: Dict[str, Any]) -> Dict[str, Any]:
