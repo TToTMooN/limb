@@ -115,7 +115,14 @@ lint.ignore = [
     "RUF009"
 ]
 lint.extend-select = ["E501"]
-exclude = ["*.ipynb", "dependencies/*"]
+exclude = [
+    "*.ipynb",
+    "dependencies/*",
+    # Vendored third-party code tracks upstream byte-for-byte
+    # (apart from documented import-path rewrites).
+    "limb/vendor/**",
+]
+force-exclude = true
 
 [tool.ruff.format]
 docstring-code-format = true

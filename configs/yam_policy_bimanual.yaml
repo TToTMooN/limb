@@ -7,7 +7,11 @@
 # black frames in their place (X-VLA tolerates via image_mask; FM/DP do not).
 
 _target_: limb.envs.launch.LaunchConfig
-hz: 100.0
+# Match the dataset fps the policy was trained on. Our YAM datasets are 30 fps;
+# running the control loop at 100 Hz (the teleop default) makes policy actions
+# play back ~3.3× faster than recorded. Verify by checking
+# `meta/info.json:fps` of the dataset that produced the checkpoint.
+hz: 60.0
 
 sensors:
   cameras:
@@ -16,12 +20,12 @@ sensors:
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
             serial_number: "215122256240"
-    left_wrist_camera:
+    right_wrist_camera:
         _target_: limb.sensors.cameras.camera.CameraNode
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
             serial_number: "409122274017"
-    right_wrist_camera:
+    left_wrist_camera:
         _target_: limb.sensors.cameras.camera.CameraNode
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
@@ -58,19 +62,30 @@ agent:
     arm_names: ["left", "right"]
     joints_per_arm: 7
     include_vel: false
-    gripper_clip: [0.0, 1.0]
-  action_horizon: 8     # FM/DP default; bump to 30 for X-VLA, 50 for pi0.5
+    # YAM bimanual gripper position spans [0.0, 2.4] in the trained dataset
+    # (verify: meta/stats.json action.min[6]/max[6] for left, [13]/[13] for right).
+    # The default [0,1] would silently truncate "fully open" commands.
+    gripper_clip: [0.0, 2.4]
+  # Hint only — ActionChunkManager auto-adopts the actual horizon from the
+  # server's first chunk response. The value here just sizes the initial smoothing
+  # window. 16 is a sane default for FM (which typically emits 8 actions per chunk)
+  # and DP; X-VLA emits 30, pi0.5 emits 50.
+  action_horizon: 16
   smoothing_window: 4
-  async_inference: true
+  # Sync inference: each act() blocks on a fresh chunk and the whole chunk is
+  # consumed before the next request. Avoids the async-replacement issue where
+  # a fast-inferring local server overwrites the buffer mid-consumption,
+  # turning the action stream into "first action of each new chunk" jitter.
+  async_inference: false
 
-recording:
-  _target_: limb.recording.episode_recorder.EpisodeRecorder
-  base_dir: "recordings"
-  recording_fps: 30
-  auto_start: true
-  ee_frame_names:
-    left: "ee_link"
-    right: "ee_link"
+# recording:
+#   _target_: limb.recording.episode_recorder.EpisodeRecorder
+#   base_dir: "recordings"
+#   recording_fps: 30
+#   auto_start: true
+#   ee_frame_names:
+#     left: "ee_link"
+#     right: "ee_link"
 
 station_metadata:
   world_frame: "left_arm"
