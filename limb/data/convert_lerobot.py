@@ -50,6 +50,11 @@ from limb.data.episode_utils import (
     find_episodes,
     load_episode,
 )
+from limb.data.resample import (
+    detect_source_fps,
+    resample_state_action,
+    resample_video,
+)
 
 CODEBASE_VERSION = "v3.0"
 
@@ -60,9 +65,20 @@ class Args:
     output_dir: str
     task: Optional[str] = None
     robot_type: str = "yam"
-    fps: int = 30
+    # Output dataset rate. None → use each episode's detected real rate (no
+    # resampling, just honest labeling). Set explicitly to resample state /
+    # action / video onto a regular target-fps grid.
+    target_fps: Optional[int] = None
+    # Action dims that use nearest-neighbor instead of linear interp during
+    # resampling. Typically the gripper dims (binarized 0 ↔ max). Default
+    # matches the YAM bimanual action layout (left_gripper=6, right_gripper=13).
+    nearest_action_dims: tuple = (6, 13)
     success_only: bool = False
     push_to_hub: Optional[str] = None
+    # Deprecated: pre-resample, the legacy --fps flag relabeled to a hardcoded
+    # rate without touching the data. Kept for backwards compatibility with
+    # existing scripts; if --target-fps is set, it takes precedence.
+    fps: Optional[int] = None
 
 
 def _probe_video_codec(path: Path) -> str:
@@ -87,7 +103,7 @@ def _compute_episode_stats(
     actions: np.ndarray,
     cam_names: List[str],
     episode_length: int,
-    fps: int,
+    fps: float,
 ) -> Dict[str, Dict[str, Any]]:
     """Compute per-feature stats for a single episode (v3.0 episodes parquet)."""
     stats: Dict[str, Dict[str, Any]] = {}
@@ -164,6 +180,20 @@ def main(args: Args) -> None:
         video_dir = output_dir / "videos" / f"observation.images.{cam_name}" / "chunk-000"
         video_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve fps policy. `--target-fps` (new) takes precedence; `--fps` is the
+    # legacy alias kept for backwards compatibility. When both are None we
+    # auto-detect each episode's real source fps from its timestamps.npy.
+    legacy_fps = args.fps
+    target_fps_override: Optional[int] = args.target_fps if args.target_fps is not None else legacy_fps
+    if legacy_fps is not None and args.target_fps is None:
+        logger.warning(
+            "--fps {} is deprecated; use --target-fps to make the resampling intent explicit. "
+            "Treating as --target-fps {}.",
+            legacy_fps, legacy_fps,
+        )
+    elif target_fps_override is None:
+        logger.info("No --target-fps: auto-detecting each episode's source fps; no resampling.")
+
     all_states: List[np.ndarray] = []
     all_actions: List[np.ndarray] = []
     episodes_rows: List[Dict[str, Any]] = []
@@ -171,6 +201,8 @@ def main(args: Args) -> None:
     video_codec: Optional[str] = None
     total_data_bytes = 0
     total_video_bytes = 0
+    per_episode_output_fps: List[float] = []
+    zoh_dims = tuple(int(d) for d in args.nearest_action_dims)
 
     for ep_idx, ep_path in enumerate(episodes):
         episode = load_episode(ep_path)
@@ -185,7 +217,39 @@ def main(args: Args) -> None:
         n_steps = min(len(states), len(actions)) if len(actions) > 0 else len(states)
         states = states[:n_steps]
         actions = actions[:n_steps] if len(actions) > 0 else np.zeros((n_steps, action_dim), dtype=np.float32)
+        timestamps = np.asarray(episode["timestamps"], dtype=np.float64)[:n_steps]
 
+        source_fps = detect_source_fps(timestamps)
+        if source_fps <= 0:
+            logger.warning("Skipping {}: invalid timestamps (duration <= 0)", ep_path.name)
+            continue
+
+        # Decide whether to resample. We treat a target within ±1% of source
+        # as "same rate" — saves a re-encode without changing the data.
+        do_resample = (
+            target_fps_override is not None
+            and abs(target_fps_override - source_fps) / source_fps > 0.01
+        )
+        output_fps = float(target_fps_override) if target_fps_override is not None else source_fps
+
+        if do_resample:
+            logger.info(
+                "  Episode {}: resample {} steps @ {:.2f} Hz → @ {:.2f} Hz",
+                ep_idx, n_steps, source_fps, output_fps,
+            )
+            tgt_rel, states, actions = resample_state_action(
+                timestamps, states, actions, output_fps, zoh_action_dims=zoh_dims,
+            )
+            n_steps_out = len(tgt_rel)
+        else:
+            logger.info(
+                "  Episode {}: {} steps @ {:.2f} Hz (no resample{})",
+                ep_idx, n_steps, output_fps,
+                ", labels-only update" if target_fps_override is None else "",
+            )
+            n_steps_out = n_steps
+
+        per_episode_output_fps.append(output_fps)
         all_states.append(states)
         all_actions.append(actions)
 
@@ -193,36 +257,42 @@ def main(args: Args) -> None:
         table_data = {
             "observation.state": pa.array(states.tolist(), type=pa.list_(pa.float32())),
             "action": pa.array(actions.tolist(), type=pa.list_(pa.float32())),
-            "episode_index": pa.array(np.full(n_steps, ep_idx, dtype=np.int64)),
-            "frame_index": pa.array(np.arange(n_steps, dtype=np.int64)),
-            "timestamp": pa.array((np.arange(n_steps, dtype=np.float64) / args.fps).astype(np.float32)),
-            "index": pa.array(np.arange(total_frames, total_frames + n_steps, dtype=np.int64)),
-            "task_index": pa.array(np.zeros(n_steps, dtype=np.int64)),
+            "episode_index": pa.array(np.full(n_steps_out, ep_idx, dtype=np.int64)),
+            "frame_index": pa.array(np.arange(n_steps_out, dtype=np.int64)),
+            "timestamp": pa.array((np.arange(n_steps_out, dtype=np.float64) / output_fps).astype(np.float32)),
+            "index": pa.array(np.arange(total_frames, total_frames + n_steps_out, dtype=np.int64)),
+            "task_index": pa.array(np.zeros(n_steps_out, dtype=np.int64)),
         }
         table = pa.table(table_data)
         parquet_path = data_dir / f"file-{ep_idx:03d}.parquet"
         pq.write_table(table, str(parquet_path), compression="snappy")
         total_data_bytes += parquet_path.stat().st_size
 
-        # Copy videos
+        # Videos: copy verbatim when no resampling, re-encode otherwise.
         for cam in episode["cameras"]:
             src = cam["video_path"]
             dst = output_dir / "videos" / f"observation.images.{cam['name']}" / "chunk-000" / f"file-{ep_idx:03d}.mp4"
-            shutil.copy2(str(src), str(dst))
+            if do_resample:
+                # ZOH-resample the source video onto the new time grid. Uses the
+                # episode's real timestamps.npy (the source mp4's internal PTS
+                # is wrong-by-construction — recorder always tags 30 fps).
+                resample_video(src, dst, timestamps, tgt_rel, output_fps)
+            else:
+                shutil.copy2(str(src), str(dst))
             total_video_bytes += dst.stat().st_size
             if video_codec is None:
                 video_codec = _probe_video_codec(dst)
 
         # Build episodes metadata row
-        ep_stats = _compute_episode_stats(states, actions, cam_names, n_steps, args.fps)
+        ep_stats = _compute_episode_stats(states, actions, cam_names, n_steps_out, output_fps)
         row: Dict[str, Any] = {
             "episode_index": ep_idx,
             "data/chunk_index": 0,
             "data/file_index": ep_idx,
             "dataset_from_index": total_frames,
-            "dataset_to_index": total_frames + n_steps,
+            "dataset_to_index": total_frames + n_steps_out,
             "tasks": [task],
-            "length": n_steps,
+            "length": n_steps_out,
             "meta/episodes/chunk_index": 0,
             "meta/episodes/file_index": 0,
         }
@@ -231,15 +301,14 @@ def main(args: Args) -> None:
             row[f"videos/{vk}/chunk_index"] = 0
             row[f"videos/{vk}/file_index"] = ep_idx
             row[f"videos/{vk}/from_timestamp"] = 0.0
-            row[f"videos/{vk}/to_timestamp"] = float((n_steps - 1) / args.fps)
+            row[f"videos/{vk}/to_timestamp"] = float((n_steps_out - 1) / output_fps)
 
         for feat_key, feat_stats in ep_stats.items():
             for stat_name, stat_val in feat_stats.items():
                 row[f"stats/{feat_key}/{stat_name}"] = stat_val
 
         episodes_rows.append(row)
-        total_frames += n_steps
-        logger.info("  Episode {}: {} steps from {}", ep_idx, n_steps, ep_path.name)
+        total_frames += n_steps_out
 
     n_episodes = len(episodes_rows)
     if n_episodes == 0:
@@ -261,25 +330,41 @@ def main(args: Args) -> None:
         json.dump(stats, f, indent=2)
 
     # --- Write meta/info.json ---
+    # info.json's top-level `fps` is a single number, but our per-episode fps
+    # may differ when --target-fps is unset and the recordings drift. Pick the
+    # mode (most common) and warn if any episode disagrees by > 1%.
+    uniq_fps, counts = np.unique(np.round(per_episode_output_fps, 3), return_counts=True)
+    dataset_fps = float(uniq_fps[int(np.argmax(counts))])
+    if len(uniq_fps) > 1:
+        spread = (uniq_fps.max() - uniq_fps.min()) / dataset_fps
+        if spread > 0.01:
+            logger.warning(
+                "Episodes have inconsistent output fps (range {:.2f}..{:.2f} Hz). "
+                "Writing info.json:fps = {:.2f} (modal) — consumer code that joins "
+                "across episodes may need to use the per-episode timestamp column.",
+                uniq_fps.min(), uniq_fps.max(), dataset_fps,
+            )
+    info_fps = round(dataset_fps) if abs(dataset_fps - round(dataset_fps)) < 1e-3 else dataset_fps
+
     detected_codec = video_codec or "hevc"
     features: Dict[str, Any] = {
         "observation.state": {
             "dtype": "float32",
             "shape": [state_dim],
             "names": state_names,
-            "fps": args.fps,
+            "fps": info_fps,
         },
         "action": {
             "dtype": "float32",
             "shape": [action_dim],
             "names": action_names,
-            "fps": args.fps,
+            "fps": info_fps,
         },
-        "timestamp": {"dtype": "float32", "shape": [1], "names": None, "fps": args.fps},
-        "frame_index": {"dtype": "int64", "shape": [1], "names": None, "fps": args.fps},
-        "episode_index": {"dtype": "int64", "shape": [1], "names": None, "fps": args.fps},
-        "index": {"dtype": "int64", "shape": [1], "names": None, "fps": args.fps},
-        "task_index": {"dtype": "int64", "shape": [1], "names": None, "fps": args.fps},
+        "timestamp": {"dtype": "float32", "shape": [1], "names": None, "fps": info_fps},
+        "frame_index": {"dtype": "int64", "shape": [1], "names": None, "fps": info_fps},
+        "episode_index": {"dtype": "int64", "shape": [1], "names": None, "fps": info_fps},
+        "index": {"dtype": "int64", "shape": [1], "names": None, "fps": info_fps},
+        "task_index": {"dtype": "int64", "shape": [1], "names": None, "fps": info_fps},
     }
     for cam_name in cam_names:
         features[f"observation.images.{cam_name}"] = {
@@ -287,7 +372,7 @@ def main(args: Args) -> None:
             "shape": [480, 640, 3],
             "names": ["height", "width", "channels"],
             "video_info": {
-                "video.fps": args.fps,
+                "video.fps": info_fps,
                 "video.codec": detected_codec,
                 "video.pix_fmt": "yuv420p",
                 "video.is_depth_map": False,
@@ -302,7 +387,7 @@ def main(args: Args) -> None:
         "total_frames": total_frames,
         "total_tasks": 1,
         "chunks_size": 1000,
-        "fps": args.fps,
+        "fps": info_fps,
         "splits": {"train": f"0:{n_episodes}"},
         "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
         "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
@@ -320,7 +405,7 @@ def main(args: Args) -> None:
         robot_type=args.robot_type,
         n_episodes=n_episodes,
         total_frames=total_frames,
-        fps=args.fps,
+        fps=info_fps,
         cam_names=cam_names,
         state_names=state_names,
         action_names=action_names,
@@ -345,7 +430,7 @@ def _write_dataset_card(
     robot_type: str,
     n_episodes: int,
     total_frames: int,
-    fps: int,
+    fps: float,
     cam_names: List[str],
     state_names: List[str],
     action_names: List[str],
