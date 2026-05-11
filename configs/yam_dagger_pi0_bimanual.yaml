@@ -1,0 +1,138 @@
+# 4-YAM DAgger with a pi0 / pi0.5 / pi0-FAST inner_policy.
+#
+# This is the full combined config: the DAgger phase machine wrapping a
+# YamPolicyAgent that talks OpenPI to a serve_policy.py running on :8111.
+# Followers driven by the policy in AUTONOMOUS, by the operator (via leader
+# bilateral teleop) in CORRECTING.
+#
+# Pedal bindings (PCsensor / iKKEGOL double pedal):
+#   left pedal  (KEY_A) -> pause_resume   (AUTONOMOUS <-> PAUSED)
+#   right pedal (KEY_B) -> correction     (PAUSED     <-> CORRECTING)
+#
+# Server (separate shell, no --compile on PyTorch nightly):
+#   cd ~/playground/openpi && uv run python scripts/serve_policy.py \
+#     --checkpoint ttotmoon/<your-pi0-checkpoint>
+#
+# Launch (no recording):
+#   uv run limb teleop --config-path configs/yam_dagger_pi0_bimanual.yaml
+#
+# Launch + record correction sessions (continuous, label per-frame):
+#   uv run limb record --config-path configs/yam_dagger_pi0_bimanual.yaml \
+#                                    configs/dagger_collection.yaml
+#
+# When trained with the recorded dataset, the policy learns failure ->
+# recovery mappings, not just successful trajectories. Filter to the
+# corrections subset at training time with `df[df.phase == 'correcting']`.
+
+_target_: limb.envs.launch.LaunchConfig
+# Match the dataset fps the policy was trained on. YAM datasets are 30 fps;
+# 60 Hz plays back closer to the original demo pace and gives the recorder
+# more leeway for capturing intervention edges precisely.
+hz: 60.0
+
+sensors:
+  cameras:
+    head_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "215122256240"
+    left_wrist_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "409122274017"
+    right_wrist_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "409122274543"
+
+robots:
+  # Two follower arms (commanded by the policy / bilateral teleop)
+  left:          ["robot_configs/yam/left.yaml"]
+  right:         ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+  # Two leader arms (mirror followers in AUTO, operator backdrive in CORRECTING)
+  leader_left:   ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_left.yaml"]
+  leader_right:  ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_right.yaml"]
+
+# Leaders boot in zero_torque so they don't hit motor 1 hard during init.
+# DAggerAgent flips them to position_mode on its first AUTONOMOUS tick.
+release_at_startup:
+  - leader_left
+  - leader_right
+
+agent:
+  _target_: limb.agents.dagger.DAggerAgent
+  follower_keys: [left, right]
+  leader_keys:   [leader_left, leader_right]
+
+  # Linear blend ramp on PAUSED -> AUTONOMOUS. Smooths the first 0.5s of
+  # commanded actions from wherever the operator left the followers to the
+  # policy's chunk target. Set to 0.0 for hard switch.
+  resume_ramp_s: 0.5
+  # Soft-backdrive damping during CORRECTING (0.0 = pure zero_torque).
+  # 0.10 is a good starting point for the YAM leaders.
+  correcting_kd_scale: 0.10
+  # Re-stiffen leaders at their observed pose on CORRECTING -> PAUSED so
+  # they don't sag while you decide whether to resume.
+  pause_stiffens_leader: true
+
+  # ---- Pi0 inner_policy (OpenPI protocol) ----
+  # Same shape as the standalone configs/yam_pi0_bimanual.yaml. Drives the
+  # followers in AUTONOMOUS. Reset() is called on every PAUSED->AUTONOMOUS
+  # edge to flush stale action chunks (safe for sync inference).
+  inner_policy:
+    _target_: limb.agents.policy_learning.policy_agent.YamPolicyAgent
+    client:
+      _target_: limb.agents.policy_learning.policy_client.OpenPIClient
+      host: "0.0.0.0"
+      port: 8111
+    obs_transform:
+      _target_: limb.agents.policy_learning.transforms.OpenPIObsTransform
+      state_keys:
+        - "left-joint_pos"
+        - "left-gripper_pos"
+        - "right-joint_pos"
+        - "right-gripper_pos"
+      # AlohaInputs convention (pi0/pi0.5 finetunes): cam_high / cam_left_wrist / cam_right_wrist.
+      image_keys:
+        cam_high: "head_camera-images-rgb"
+        cam_left_wrist: "left_wrist_camera-images-rgb"
+        cam_right_wrist: "right_wrist_camera-images-rgb"
+      image_size: [224, 224]
+      prompt: "place the vial into the stand"   # required for VLAs
+    action_transform:
+      _target_: limb.agents.policy_learning.transforms.ActionTransform
+      arm_names: ["left", "right"]
+      joints_per_arm: 7
+      include_vel: false
+      gripper_clip: [0.0, 2.4]
+    action_horizon: 50      # pi0.5 default
+    smoothing_window: 4
+    async_inference: false  # sync — DAgger reset path is currently sync-only
+
+  # ---- Bilateral teleop for CORRECTING ----
+  inner_teleop:
+    _target_: limb.agents.teleoperation.yam_yam_bilateral_agent.YamYamBilateralAgent
+    follower_keys: [left, right]
+    leader_keys:   [leader_left, leader_right]
+    joint_signs:   [1, 1, 1, 1, 1, 1]
+    gripper_passthrough: true
+
+  # ---- Foot pedal phase trigger ----
+  phase_trigger:
+    _target_: limb.agents.dagger.FootPedalPhaseTrigger
+    device_path: "auto"
+    # PCsensor double-pedal default IDs; override if yours differs.
+    vendor_id:  0x3553
+    product_id: 0xb001
+    pause_resume_key: "KEY_A"
+    correction_key:   "KEY_B"
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]
