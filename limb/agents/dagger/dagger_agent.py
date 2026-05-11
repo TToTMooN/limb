@@ -151,6 +151,13 @@ class DAggerAgent(Agent):
                 entry.update(self._leader_mode_payload)
             self._leader_mode_payload = None
 
+        # 4) Stamp phase metadata for the recorder. Underscore-prefixed keys
+        # are ignored by env._apply_action (it only consumes per-arm dicts).
+        # The recorder strips them out of the action it stores and writes them
+        # to phase.npy / correction_index.npy.
+        action["_phase"] = phase.value           # "autonomous" | "paused" | "correcting"
+        action["_correction_index"] = self._correction_index
+
         return action
 
     @remote(serialization_needed=True)
@@ -298,9 +305,25 @@ class DAggerAgent(Agent):
         # holds them or they sag onto gravity-comp equilibrium.
 
     def _dispatch_autonomous(self, obs: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-        """AUTONOMOUS: policy drives followers; mirror followers' targets onto leaders."""
+        """AUTONOMOUS: policy drives followers; mirror followers' targets onto leaders.
+
+        For RECAP-style training we also stash the *unblended* policy target on
+        each follower entry as ``policy_pos``.  During the resume blend window
+        ``pos`` (commanded) differs from ``policy_pos`` (raw policy output);
+        outside the blend they are equal.  The recorder picks ``policy_pos``
+        up so the dataset preserves both streams.
+        """
         follower_action = self.inner_policy.act(obs)
         action: Dict[str, Dict[str, Any]] = dict(follower_action) if follower_action else {}
+
+        # Snapshot the policy's raw target before we touch it. Used as
+        # `policy_pos` below so the recorder can distinguish blended vs
+        # un-blended commands.
+        policy_targets: Dict[str, np.ndarray] = {}
+        for fkey in self.follower_keys:
+            fentry = action.get(fkey)
+            if isinstance(fentry, dict) and "pos" in fentry:
+                policy_targets[fkey] = np.asarray(fentry["pos"]).copy()
 
         # Apply the post-resume blend ramp.  Each armed follower's command is
         # weighted: alpha * operator_end_pose + (1 - alpha) * policy_target,
@@ -325,6 +348,13 @@ class DAggerAgent(Agent):
                         continue
                     blended = alpha * start_pos + (1.0 - alpha) * target
                     action[fkey] = {**fentry, "pos": blended}
+
+        # Re-stamp the policy_pos field after blending so each follower entry
+        # exposes both streams. Done last so it survives the blend overwrite.
+        for fkey, policy_target in policy_targets.items():
+            fentry = action.get(fkey)
+            if isinstance(fentry, dict):
+                fentry["policy_pos"] = policy_target
 
         # Mirror leaders to whatever the (possibly blended) follower target is.
         for fkey, lkey in zip(self.follower_keys, self.leader_keys, strict=True):

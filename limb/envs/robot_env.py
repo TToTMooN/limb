@@ -78,6 +78,11 @@ class RobotEnv(dm_env.Environment):
 
         with return_futures(*self._robot_dict.values()):  # type: ignore
             for name, action in action_dict.items():
+                # Underscore-prefixed keys are recorder metadata (e.g. "_phase",
+                # "_correction_index") emitted by composite agents like
+                # DAggerAgent. They flow through to the recorder, not the robot.
+                if isinstance(name, str) and name.startswith("_"):
+                    continue
                 if name == "base":
                     self._robot_dict[name].command_target_vel(action)
                 elif self._use_joint_state_as_action:

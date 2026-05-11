@@ -62,7 +62,19 @@ def load_episode(episode_dir: Path) -> Dict:
         actions_path = episode_dir / f"{arm_name}_actions.npz"
         if actions_path.exists():
             arm_data["actions"] = dict(np.load(str(actions_path)))
+        # Optional DAgger shadow stream: the policy's raw target before any
+        # resume-blend rewrite. Outside the blend window it equals actions.
+        policy_actions_path = episode_dir / f"{arm_name}_policy_actions.npz"
+        if policy_actions_path.exists():
+            arm_data["policy_actions"] = dict(np.load(str(policy_actions_path)))
         data["arms"][arm_name] = arm_data
+
+    # Optional per-frame DAgger phase metadata. Empty arrays for non-DAgger
+    # runs — downstream code should check `len(...) > 0`.
+    phase_path = episode_dir / "phase.npy"
+    data["phase"] = np.load(str(phase_path)) if phase_path.exists() else None
+    correction_path = episode_dir / "correction_index.npy"
+    data["correction_index"] = np.load(str(correction_path)) if correction_path.exists() else None
 
     data["cameras"] = []
     for mp4 in sorted(episode_dir.glob("*.mp4")):

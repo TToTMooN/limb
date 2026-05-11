@@ -71,8 +71,19 @@ def _build_obs_image_preprocess(agent_cfg: Dict[str, Any]) -> Optional[ObsPrepro
     """
     import cv2
 
-    obs_xform_cfg = agent_cfg.get("obs_transform")
-    if not isinstance(obs_xform_cfg, dict):
+    # Find the obs_transform — direct on the agent, or nested inside a
+    # composite agent's inner_policy (e.g. DAggerAgent wrapping YamPolicyAgent).
+    def _find_obs_transform(cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        xf = cfg.get("obs_transform")
+        if isinstance(xf, dict):
+            return xf
+        inner = cfg.get("inner_policy")
+        if isinstance(inner, dict):
+            return _find_obs_transform(inner)
+        return None
+
+    obs_xform_cfg = _find_obs_transform(agent_cfg)
+    if obs_xform_cfg is None:
         return None
     image_size = obs_xform_cfg.get("image_size")
     if image_size is None or len(image_size) != 2:

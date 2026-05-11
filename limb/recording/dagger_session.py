@@ -84,9 +84,16 @@ class DAggerCollectionSession:
     recorder: Any = field(default_factory=EpisodeRecorder)
     num_episodes: int = 0
     task_instruction: str = ""
-    record_autonomous: bool = False
+    # NOTE: corrections-only mode was removed in favor of always-continuous
+    # recording. Filtering to correction-only frames is now a one-line
+    # `df[df.phase == 'correcting']` at training time, which means no policy
+    # success/failure trajectory ever gets thrown away at recording time.
+    # The legacy ``record_autonomous`` and ``min_correction_steps`` knobs are
+    # kept as fields (so old YAMLs still parse) but no longer influence
+    # behaviour — both modes collapse to the previous "sentry" path.
+    record_autonomous: bool = True
     episode_duration_s: float = 300.0
-    min_correction_steps: int = 5
+    min_correction_steps: int = 0
 
     display: object = None  # StatusDisplay, set by launch.py at runtime
 
@@ -115,19 +122,21 @@ class DAggerCollectionSession:
         session_dir = str(Path(self.recorder.base_dir) / f"{task_slug}_{ts}")
         self.recorder.base_dir = session_dir
 
-        mode = "sentry" if self.record_autonomous else "corrections-only"
+        if not self.record_autonomous:
+            logger.warning(
+                "DAggerCollectionSession: record_autonomous=False is deprecated "
+                "(corrections-only mode was removed). Recording continuously; "
+                "filter to corrections at training time via phase == 'correcting'."
+            )
         logger.info(
-            "DAggerCollectionSession: mode={}, target={} episodes, task='{}'",
-            mode,
+            "DAggerCollectionSession: continuous mode, target={} episodes, task='{}'",
             self.num_episodes if self.num_episodes > 0 else "unlimited",
             self.task_instruction or "(none)",
         )
 
-        # Sentry: start the first episode immediately so we don't miss frames
-        # while waiting for the first transition.  Corrections-only: wait for
-        # the first PAUSED->CORRECTING edge.
-        if self.record_autonomous:
-            self._start_episode()
+        # Start the first episode immediately so we don't miss frames while
+        # waiting for the first phase transition.
+        self._start_episode()
 
     # ------------------------------------------------------------------ #
     #  Public API                                                        #
@@ -158,10 +167,10 @@ class DAggerCollectionSession:
             return False
         self._latest_phase = phase
 
-        if self.record_autonomous:
-            self._step_sentry(obs, action, intervention=intervention)
-        else:
-            self._step_corrections_only(obs, action, intervention=intervention)
+        # Single recording path: always-continuous (sentry-style). Corrections
+        # are labeled per-frame via the recorder's phase metadata so any
+        # downstream filter can recover the corrections-only subset.
+        self._step_sentry(obs, action, intervention=intervention)
 
         self._prev_intervention = intervention
         self._push_tui_state(intervention=intervention)
@@ -239,7 +248,7 @@ class DAggerCollectionSession:
     def _start_episode(self) -> None:
         metadata = {
             "task_instruction": self.task_instruction,
-            "dagger_mode": "sentry" if self.record_autonomous else "corrections_only",
+            "dagger_mode": "continuous",
         }
         self.recorder.start_episode(metadata=metadata)
         self._episode_start_time = time.time()

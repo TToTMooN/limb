@@ -241,6 +241,11 @@ def main(args: Args) -> None:
         )
         output_fps = float(target_fps_override) if target_fps_override is not None else source_fps
 
+        # Optional DAgger phase metadata (None when episode lacks phase.npy).
+        # These align 1:1 with the source state/action grid by construction.
+        src_phase = episode.get("phase")
+        src_corr_idx = episode.get("correction_index")
+
         if do_resample:
             logger.info(
                 "  Episode {}: resample {} steps @ {:.2f} Hz -> @ {:.2f} Hz",
@@ -250,6 +255,17 @@ def main(args: Args) -> None:
                 timestamps, states, actions, output_fps, zoh_action_dims=zoh_dims,
             )
             n_steps_out = len(tgt_rel)
+            # ZOH-resample phase metadata onto the target grid. Phase labels
+            # are discrete; ZOH is the only sensible choice and matches what
+            # we do for the gripper and video streams.
+            if src_phase is not None or src_corr_idx is not None:
+                from limb.data.resample import _zoh_indices
+                src_rel = timestamps - timestamps[0]
+                zoh = _zoh_indices(src_rel, tgt_rel)
+                if src_phase is not None and len(src_phase) >= len(timestamps):
+                    src_phase = src_phase[: len(timestamps)][zoh]
+                if src_corr_idx is not None and len(src_corr_idx) >= len(timestamps):
+                    src_corr_idx = src_corr_idx[: len(timestamps)][zoh]
         else:
             tgt_rel = None
             logger.info(
@@ -258,6 +274,11 @@ def main(args: Args) -> None:
                 ", labels-only update" if target_fps_override is None else "",
             )
             n_steps_out = n_steps
+            # Truncate to n_steps in case state/action were clipped earlier.
+            if src_phase is not None and len(src_phase) > n_steps_out:
+                src_phase = src_phase[:n_steps_out]
+            if src_corr_idx is not None and len(src_corr_idx) > n_steps_out:
+                src_corr_idx = src_corr_idx[:n_steps_out]
 
         # Videos: copy verbatim when no resampling, re-encode otherwise.
         # Cameras are processed sequentially inside the worker so each
@@ -286,6 +307,8 @@ def main(args: Args) -> None:
             "output_fps": output_fps,
             "video_size": worker_video_size,
             "codec": worker_codec,
+            "phase": src_phase,                  # may be None
+            "correction_index": src_corr_idx,    # may be None
         }
 
     results_by_idx: Dict[int, Dict[str, Any]] = {}
@@ -329,6 +352,16 @@ def main(args: Args) -> None:
             "index": pa.array(np.arange(total_frames, total_frames + n_steps_out, dtype=np.int64)),
             "task_index": pa.array(np.zeros(n_steps_out, dtype=np.int64)),
         }
+        # DAgger phase columns are appended only when the source episode had
+        # them, so non-DAgger datasets stay schema-clean.
+        if res.get("phase") is not None:
+            phase_arr = np.asarray(res["phase"])
+            if len(phase_arr) >= n_steps_out:
+                table_data["phase"] = pa.array(phase_arr[:n_steps_out].astype(str).tolist())
+        if res.get("correction_index") is not None:
+            ci = np.asarray(res["correction_index"])
+            if len(ci) >= n_steps_out:
+                table_data["correction_index"] = pa.array(ci[:n_steps_out].astype(np.int32))
         table = pa.table(table_data)
         parquet_path = data_dir / f"file-{ep_idx:03d}.parquet"
         pq.write_table(table, str(parquet_path), compression="snappy")
