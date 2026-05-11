@@ -26,6 +26,7 @@ LeRobot v3.0 output structure::
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import shutil
@@ -75,6 +76,11 @@ class Args:
     nearest_action_dims: tuple = (6, 13)
     success_only: bool = False
     push_to_hub: Optional[str] = None
+    # Episodes are independent — the expensive per-episode work (resample +
+    # 3 video re-encodes) parallelizes cleanly. Default 2 to stay well within
+    # consumer-GPU NVENC concurrency limits while still ~2x'ing throughput.
+    # Set to 1 for fully-deterministic-order logging.
+    max_workers: int = 2
     # Deprecated: pre-resample, the legacy --fps flag relabeled to a hardcoded
     # rate without touching the data. Kept for backwards compatibility with
     # existing scripts; if --target-fps is set, it takes precedence.
@@ -204,13 +210,18 @@ def main(args: Args) -> None:
     per_episode_output_fps: List[float] = []
     zoh_dims = tuple(int(d) for d in args.nearest_action_dims)
 
-    for ep_idx, ep_path in enumerate(episodes):
+    # ---- Phase 1: heavy work (load + resample + video re-encode) ----
+    # Run in a thread pool so each worker holds its own ffmpeg subprocess.
+    # The work is I/O and ffmpeg-bound — both release the GIL — so threads
+    # are enough; we don't need ProcessPool. Set max_workers low enough that
+    # NVENC concurrency stays comfortable (consumer GPUs typically handle
+    # 2-3 simultaneous H.265 encode sessions cleanly).
+    def _heavy_episode(ep_idx: int, ep_path: Path) -> Optional[Dict[str, Any]]:
         episode = load_episode(ep_path)
         n_steps = len(episode["timestamps"]) if episode["timestamps"] is not None else 0
-
         if n_steps == 0:
             logger.warning("Skipping empty episode: {}", ep_path.name)
-            continue
+            return None
 
         states = build_state_vector(episode, arm_names)
         actions = build_action_vector(episode, arm_names)
@@ -222,10 +233,8 @@ def main(args: Args) -> None:
         source_fps = detect_source_fps(timestamps)
         if source_fps <= 0:
             logger.warning("Skipping {}: invalid timestamps (duration <= 0)", ep_path.name)
-            continue
+            return None
 
-        # Decide whether to resample. We treat a target within ±1% of source
-        # as "same rate" — saves a re-encode without changing the data.
         do_resample = (
             target_fps_override is not None
             and abs(target_fps_override - source_fps) / source_fps > 0.01
@@ -234,7 +243,7 @@ def main(args: Args) -> None:
 
         if do_resample:
             logger.info(
-                "  Episode {}: resample {} steps @ {:.2f} Hz → @ {:.2f} Hz",
+                "  Episode {}: resample {} steps @ {:.2f} Hz -> @ {:.2f} Hz",
                 ep_idx, n_steps, source_fps, output_fps,
             )
             tgt_rel, states, actions = resample_state_action(
@@ -242,6 +251,7 @@ def main(args: Args) -> None:
             )
             n_steps_out = len(tgt_rel)
         else:
+            tgt_rel = None
             logger.info(
                 "  Episode {}: {} steps @ {:.2f} Hz (no resample{})",
                 ep_idx, n_steps, output_fps,
@@ -249,11 +259,67 @@ def main(args: Args) -> None:
             )
             n_steps_out = n_steps
 
+        # Videos: copy verbatim when no resampling, re-encode otherwise.
+        # Cameras are processed sequentially inside the worker so each
+        # worker only ever has 1 ffmpeg subprocess running at a time.
+        worker_video_size = 0
+        worker_codec: Optional[str] = None
+        for cam in episode["cameras"]:
+            src = cam["video_path"]
+            dst = (
+                output_dir / "videos" / f"observation.images.{cam['name']}"
+                / "chunk-000" / f"file-{ep_idx:03d}.mp4"
+            )
+            if do_resample:
+                resample_video(src, dst, timestamps, tgt_rel, output_fps)
+            else:
+                shutil.copy2(str(src), str(dst))
+            worker_video_size += dst.stat().st_size
+            if worker_codec is None:
+                worker_codec = _probe_video_codec(dst)
+
+        return {
+            "ep_idx": ep_idx,
+            "states": states,
+            "actions": actions,
+            "n_steps_out": n_steps_out,
+            "output_fps": output_fps,
+            "video_size": worker_video_size,
+            "codec": worker_codec,
+        }
+
+    results_by_idx: Dict[int, Dict[str, Any]] = {}
+    if args.max_workers <= 1:
+        for ep_idx, ep_path in enumerate(episodes):
+            res = _heavy_episode(ep_idx, ep_path)
+            if res is not None:
+                results_by_idx[ep_idx] = res
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as pool:
+            future_to_idx = {
+                pool.submit(_heavy_episode, ep_idx, ep_path): ep_idx
+                for ep_idx, ep_path in enumerate(episodes)
+            }
+            for fut in concurrent.futures.as_completed(future_to_idx):
+                ep_idx = future_to_idx[fut]
+                res = fut.result()
+                if res is not None:
+                    results_by_idx[ep_idx] = res
+
+    # ---- Phase 2: serialized parquet writes + metadata aggregation ----
+    # Strict ascending ep_idx order so `index` and `dataset_from_index` are
+    # contiguous and reproducible. Parquet writes are cheap (~ms each).
+    for ep_idx in sorted(results_by_idx.keys()):
+        res = results_by_idx[ep_idx]
+        states = res["states"]
+        actions = res["actions"]
+        n_steps_out = res["n_steps_out"]
+        output_fps = res["output_fps"]
+
         per_episode_output_fps.append(output_fps)
         all_states.append(states)
         all_actions.append(actions)
 
-        # Write data parquet with list<float32> columns
         table_data = {
             "observation.state": pa.array(states.tolist(), type=pa.list_(pa.float32())),
             "action": pa.array(actions.tolist(), type=pa.list_(pa.float32())),
@@ -267,23 +333,10 @@ def main(args: Args) -> None:
         parquet_path = data_dir / f"file-{ep_idx:03d}.parquet"
         pq.write_table(table, str(parquet_path), compression="snappy")
         total_data_bytes += parquet_path.stat().st_size
+        total_video_bytes += res["video_size"]
+        if video_codec is None:
+            video_codec = res["codec"]
 
-        # Videos: copy verbatim when no resampling, re-encode otherwise.
-        for cam in episode["cameras"]:
-            src = cam["video_path"]
-            dst = output_dir / "videos" / f"observation.images.{cam['name']}" / "chunk-000" / f"file-{ep_idx:03d}.mp4"
-            if do_resample:
-                # ZOH-resample the source video onto the new time grid. Uses the
-                # episode's real timestamps.npy (the source mp4's internal PTS
-                # is wrong-by-construction — recorder always tags 30 fps).
-                resample_video(src, dst, timestamps, tgt_rel, output_fps)
-            else:
-                shutil.copy2(str(src), str(dst))
-            total_video_bytes += dst.stat().st_size
-            if video_codec is None:
-                video_codec = _probe_video_codec(dst)
-
-        # Build episodes metadata row
         ep_stats = _compute_episode_stats(states, actions, cam_names, n_steps_out, output_fps)
         row: Dict[str, Any] = {
             "episode_index": ep_idx,
@@ -302,11 +355,9 @@ def main(args: Args) -> None:
             row[f"videos/{vk}/file_index"] = ep_idx
             row[f"videos/{vk}/from_timestamp"] = 0.0
             row[f"videos/{vk}/to_timestamp"] = float((n_steps_out - 1) / output_fps)
-
         for feat_key, feat_stats in ep_stats.items():
             for stat_name, stat_val in feat_stats.items():
                 row[f"stats/{feat_key}/{stat_name}"] = stat_val
-
         episodes_rows.append(row)
         total_frames += n_steps_out
 

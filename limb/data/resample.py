@@ -148,6 +148,7 @@ def resample_video(
     src_timestamps: np.ndarray,
     target_rel_t: np.ndarray,
     target_fps: float,
+    codec: str = "auto",
 ) -> int:
     """Resample a recorded mp4 to ``target_fps`` using zero-order hold.
 
