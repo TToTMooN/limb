@@ -276,7 +276,12 @@ class EpisodeRecorder:
                 if arm_obs.ee_pose is not None:
                     self._arm_states[arm_name]["ee_pose"].append(arm_obs.ee_pose.copy())
 
-            # Record actions (and the policy_pos shadow stream when present)
+            # Record actions (and the policy_pos shadow stream when present).
+            # For composite agents like DAggerAgent the action dict can be {}
+            # (PAUSED) or omit specific arms (leaders during CORRECTING). The
+            # physical robot holds the last commanded position via PD in those
+            # cases, so we record the same thing — the previous tick's value —
+            # so every action array stays aligned with timestamps / states.
             for arm_name, arm_action in action.items():
                 if isinstance(arm_name, str) and arm_name.startswith("_"):
                     continue  # phase metadata handled above
@@ -292,6 +297,24 @@ class EpisodeRecorder:
                     self._policy_actions.setdefault(arm_name, {}).setdefault(
                         "pos", []
                     ).append(np.asarray(arm_action["policy_pos"]))
+
+            # Hold-the-last-value padding for arms that were silent this tick.
+            # The physical command was "hold last commanded position" (PD on
+            # the env side), so the recorded action stream stays causally
+            # consistent with what the robot actually did.
+            target_len = self._step_idx + 1
+
+            def _pad_to_target(store: Dict[str, Dict[str, List[np.ndarray]]]) -> None:
+                for arm_store in store.values():
+                    for history in arm_store.values():
+                        while len(history) < target_len:
+                            if history:
+                                history.append(history[-1].copy())
+                            else:
+                                break  # arm never seen yet — leave the gap
+
+            _pad_to_target(self._actions)
+            _pad_to_target(self._policy_actions)
 
             # Record camera frames as video (async, NVENC when available)
             for cam_name, cam_obs in obs.cameras.items():

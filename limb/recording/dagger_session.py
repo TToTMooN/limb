@@ -301,7 +301,7 @@ class DAggerCollectionSession:
             session_dir = Path(self._completed[0]["episode_dir"]).parent
             logger.info("  Saved to: {}", session_dir)
             summary = {
-                "mode": "sentry" if self.record_autonomous else "corrections_only",
+                "mode": "continuous",
                 "task_instruction": self.task_instruction,
                 "num_episodes": self.episodes_completed,
                 "num_successful": self.episodes_successful,
