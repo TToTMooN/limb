@@ -15,12 +15,15 @@ sensors:
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
             serial_number: "215122256240"
-    left_wrist_camera:
+    # Serials swapped to match physical mounting (same as yam_policy_bimanual.yaml
+    # and yam_xvla_bimanual.yaml — the camera mounted on the right arm is serial
+    # 4017, not 4543, despite what the original YAML assumed).
+    right_wrist_camera:
         _target_: limb.sensors.cameras.camera.CameraNode
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
             serial_number: "409122274017"
-    right_wrist_camera:
+    left_wrist_camera:
         _target_: limb.sensors.cameras.camera.CameraNode
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
