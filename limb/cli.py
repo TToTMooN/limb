@@ -123,15 +123,29 @@ class MarkCommand:
 
 @dataclass
 class ConvertLerobotCommand:
-    """Convert raw recordings to LeRobot v2.1 dataset format."""
+    """Convert raw recordings to LeRobot v3.0 dataset format."""
 
     input_dir: str
     output_dir: str
     task: Optional[str] = None
     robot_type: str = "yam"
-    fps: int = 30
+    # Output dataset rate. None → auto-detect each episode's real source fps
+    # from timestamps.npy and write at that rate (no resampling, just honest
+    # labeling). Set explicitly to resample state / action / video onto a
+    # regular target-fps grid.
+    target_fps: Optional[int] = None
+    # Action dims that use zero-order hold instead of linear interp during
+    # resampling (typically gripper dims, which are bimodal). Default matches
+    # the YAM bimanual action layout (left_gripper=6, right_gripper=13).
+    nearest_action_dims: Tuple[int, ...] = (6, 13)
+    # Episode-level parallelism for the per-episode resample + video
+    # re-encode. Default 2 to stay within consumer-GPU NVENC limits.
+    max_workers: int = 2
     success_only: bool = False
     push_to_hub: Optional[str] = None
+    # Deprecated alias for --target-fps. Kept so old scripts using --fps
+    # don't break; emits a warning and is treated as --target-fps when set.
+    fps: Optional[int] = None
 
     def run(self) -> None:
         from limb.data.convert_lerobot import Args, main
@@ -142,9 +156,12 @@ class ConvertLerobotCommand:
                 output_dir=self.output_dir,
                 task=self.task,
                 robot_type=self.robot_type,
-                fps=self.fps,
+                target_fps=self.target_fps,
+                nearest_action_dims=self.nearest_action_dims,
+                max_workers=self.max_workers,
                 success_only=self.success_only,
                 push_to_hub=self.push_to_hub,
+                fps=self.fps,
             )
         )
 
