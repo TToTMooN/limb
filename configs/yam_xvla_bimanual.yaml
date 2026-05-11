@@ -9,8 +9,10 @@
 #
 # Notes vs yam_policy_bimanual.yaml (FM):
 #   • action_horizon 30: matches X-VLA's n_action_steps (see lobe configs/yam.py:YAMXVLAConfig).
-#   • async_inference true: X-VLA inference (~85 ms steady-state) is well under the
-#     30/30 = 1 s buffer drain, so chunk replacement happens cleanly between drains.
+#   • async_inference false: kept sync after hardware testing showed async chunk
+#     replacement degrading the action stream on this stack. With horizon=30 at
+#     hz=60, buffer drain is 30/60 = 0.5 s; X-VLA inference is ~85 ms, so sync
+#     means a ~0.085/0.5 ≈ 17% inference-overhead drag on average rate. Acceptable.
 #   • image_size [256, 256]: X-VLA's first two camera features are 256×256; the third
 #     (image3, from right_wrist_camera) is 224×224 internally, but the server's
 #     interp-resize handles the down-resize. limb's ObsTransform only sends one
@@ -80,9 +82,10 @@ agent:
     gripper_clip: [0.0, 2.4]   # YAM dataset action range — same as FM config
   action_horizon: 30           # X-VLA n_action_steps
   smoothing_window: 4
-  # X-VLA buffer is 30/30 = 1 s at hz=30 (1.5 s when hz=60 with chunk drain interpretation);
-  # inference is ~85 ms steady-state, so async chunk replacement happens between
-  # drains rather than mid-drain. No jitter risk like the FM/horizon=8 case.
+  # Sync mode: hardware testing on this stack showed async chunk replacement
+  # producing worse motion than letting each chunk fully drain. Buffer drain at
+  # horizon=30/hz=60 is 0.5 s; X-VLA inference is ~85 ms steady-state, so the
+  # sync overhead is roughly 0.085/0.5 ≈ 17% effective-rate drag per chunk.
   async_inference: false
 
 # recording:

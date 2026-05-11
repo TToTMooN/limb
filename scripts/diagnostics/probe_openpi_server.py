@@ -8,7 +8,8 @@ Useful for telling apart "policy is bad" from "limb is sending obs wrong".
 If chunk[0] tracks GT actions within a few mrad, the policy is healthy and
 any deployment issue is client-side.
 
-Requires `openpi-client` (limb optional extra: ``uv sync --extra openpi``).
+Uses the vendored OpenPI client in ``limb.vendor.openpi_client`` — no
+external dependency.
 
 Usage::
 
@@ -63,7 +64,8 @@ def _resize_chw(rgb: np.ndarray, h: int, w: int) -> np.ndarray:
 def main(args: Args) -> None:
     """Send training-dataset obs to an OpenPI server and compare returned chunks vs GT actions."""
     import pandas as pd
-    from openpi_client import websocket_client_policy as wcp
+
+    from limb.vendor.openpi_client import WebsocketClientPolicy
 
     df = pd.read_parquet(args.parquet)
     ep0 = df[df["episode_index"] == df["episode_index"].iloc[0]].reset_index(drop=True)
@@ -91,7 +93,7 @@ def main(args: Args) -> None:
         c.release()
 
     logger.info("Connecting to ws://{}:{}", args.host, args.port)
-    client = wcp.WebsocketClientPolicy(host=args.host, port=args.port)
+    client = WebsocketClientPolicy(host=args.host, port=args.port)
     logger.info("Server metadata: {}", client.get_server_metadata())
 
     chunks, dts = [], []
