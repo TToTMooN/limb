@@ -91,8 +91,15 @@ class EpisodeReplayAgent(Agent):
         # Prefer recorded actions (they include the gripper and exactly match
         # what was commanded).  Fall back to states for legacy episodes that
         # never wrote actions.
+        # NOTE: `*_policy_actions.npz` (raw policy output before any blending
+        # the DAgger agent applies) is loaded under keys like "left_policy" by
+        # the shared loader.  Those are diagnostics, not robots we can command,
+        # so we skip them here — otherwise act() would emit commands for
+        # non-existent arm names and crash RobotEnv._apply_action.
         action_arrays: Dict[str, np.ndarray] = {}
         for arm_name, arm_actions in data["actions"].items():
+            if arm_name.endswith("_policy"):
+                continue
             if "pos" in arm_actions:
                 action_arrays[arm_name] = np.asarray(arm_actions["pos"])
         if not action_arrays:

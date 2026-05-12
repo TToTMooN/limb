@@ -238,8 +238,12 @@ class DAggerCollectionSession:
                 "Rotating episode (elapsed={:.1f}s, episode_duration_s={:.1f}s)", elapsed, self.episode_duration_s
             )
             self._finish_episode(success=True)
-            # Start the next one immediately so the next tick has somewhere to write.
-            self._start_episode()
+            # Start the next one immediately so the next tick has somewhere to
+            # write — but only if we still have episodes to collect.  Otherwise
+            # the outer `step()` guard would flush a zero-step episode and we'd
+            # overshoot the requested count.
+            if self.num_episodes == 0 or self.episodes_completed < self.num_episodes:
+                self._start_episode()
 
     # ------------------------------------------------------------------ #
     #  Episode lifecycle                                                 #
