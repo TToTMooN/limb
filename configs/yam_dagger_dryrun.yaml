@@ -1,0 +1,74 @@
+# DAgger DRY RUN: no policy, only the state machine + leader mode-switching.
+#
+# Both inner agents are YamYamBilateralAgent, so the followers track the
+# leaders in every phase.  The only operator-observable difference between
+# phases is the leaders' stiffness:
+#
+#   AUTONOMOUS  -> leaders STIFF (position mode, holding their current pose)
+#                   ... pushing a leader will be resisted by PD gains.
+#   PAUSED      -> all robots HOLD (env skips _apply_action when action={})
+#                   ... leaders stay in whatever mode they were in.
+#   CORRECTING  -> leaders RELEASED (zero_torque, gravity-comp only)
+#                   ... pushing a leader is easy; followers track it.
+#
+# Use this to validate:
+#   * Pedal events reach DAgger and produce phase log lines.
+#   * `position_mode` and `zero_torque_mode` switch correctly on transitions.
+#   * Leaders feel stiff in AUTO and released in CORR (touch test).
+#   * No drops / motor faults across many transitions.
+#
+# Once this passes, swap the inner_policy block for an actual policy
+# (yam_dagger_bimanual.yaml).
+#
+# Launch:
+#   uv run limb teleop --config-path configs/yam_dagger_dryrun.yaml
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 100.0
+
+robots:
+  left:          ["robot_configs/yam/left.yaml"]
+  right:         ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+  leader_left:   ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_left.yaml"]
+  leader_right:  ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_right.yaml"]
+
+release_at_startup:
+  - leader_left
+  - leader_right
+
+agent:
+  _target_: limb.agents.dagger.DAggerAgent
+  follower_keys: [left, right]
+  leader_keys:   [leader_left, leader_right]
+
+  # Stand-in "policy" — same bilateral teleop as inner_teleop.  In AUTO this
+  # makes the followers continue to track the leaders, but the leaders are
+  # in stiff position mode so the operator can't move them easily.
+  inner_policy:
+    _target_: limb.agents.teleoperation.yam_yam_bilateral_agent.YamYamBilateralAgent
+    follower_keys: [left, right]
+    leader_keys:   [leader_left, leader_right]
+    joint_signs:   [1, 1, 1, 1, 1, 1]
+    gripper_passthrough: true
+
+  inner_teleop:
+    _target_: limb.agents.teleoperation.yam_yam_bilateral_agent.YamYamBilateralAgent
+    follower_keys: [left, right]
+    leader_keys:   [leader_left, leader_right]
+    joint_signs:   [1, 1, 1, 1, 1, 1]
+    gripper_passthrough: true
+
+  phase_trigger:
+    _target_: limb.agents.dagger.FootPedalPhaseTrigger
+    device_path: "auto"
+    vendor_id:  0x3553
+    product_id: 0xb001
+    pause_resume_key: "KEY_A"
+    correction_key:   "KEY_B"
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]

@@ -77,6 +77,17 @@ class ActionChunkManager:
             self._index += 1
             return action
 
+    def reset(self) -> None:
+        """Drop any buffered actions so the next ``get_action`` blocks for fresh inference.
+
+        Used by composite agents (e.g. DAggerAgent) when handing control back to
+        the policy after a human-correction window — stale chunks from before
+        the takeover would otherwise replay.
+        """
+        with self._lock:
+            self._buffer = None
+            self._index = 0
+
     @property
     def has_actions(self) -> bool:
         with self._lock:

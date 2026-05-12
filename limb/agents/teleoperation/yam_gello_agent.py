@@ -97,6 +97,9 @@ class YamGelloAgent(Agent):
         If True, spawn a ``JoyConGripperReader`` to read gripper values from
         paired Nintendo Joy-Con controllers via Bluetooth.  Requires the
         ``evdev`` package.
+    joycon_gripper_proportional : bool
+        If True (default), the Joy-Con stick controls gripper velocity
+        proportionally.  If False, only the binary ZL/ZR toggle is active.
     default_gripper_value : float
         Gripper position sent every step when *joycon_gripper* is False
         (0.0 = open).
@@ -116,6 +119,7 @@ class YamGelloAgent(Agent):
         joint_signs_left: Sequence[int] = (1, 1, -1, -1, -1, 1),
         joint_signs_right: Sequence[int] = (1, 1, -1, -1, -1, 1),
         joycon_gripper: bool = False,
+        joycon_gripper_proportional: bool = True,
         default_gripper_value: float = 0.0,
     ) -> None:
         self.bimanual = bimanual
@@ -128,8 +132,11 @@ class YamGelloAgent(Agent):
         if joycon_gripper:
             from limb.devices.joycon_gripper_reader import JoyConGripperReader
 
-            self._gripper_reader = JoyConGripperReader()
-            logger.info("Joy-Con gripper control enabled")
+            self._gripper_reader = JoyConGripperReader(proportional=joycon_gripper_proportional)
+            logger.info(
+                "Joy-Con gripper control enabled (proportional=%s)",
+                joycon_gripper_proportional,
+            )
 
         self._n_left = len(left_motor_ids)
         self._n_right = len(right_motor_ids) if bimanual else 0

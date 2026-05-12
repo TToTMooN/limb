@@ -1,0 +1,35 @@
+# DAgger continuous (RECAP-style) data collection overlay.
+#
+# Combine with a DAgger teleop config; the recorder runs from the first tick
+# and writes one parquet column per frame with the current phase
+# (`autonomous` / `paused` / `correcting`).  Filtering to corrections-only
+# is a one-liner at training time (`df[df.phase == 'correcting']`), so
+# no policy success/failure trajectory ever gets thrown away at record
+# time.
+#
+# Usage:
+#   uv run limb record \
+#     --config-path configs/yam_dagger_bimanual.yaml \
+#                   configs/dagger_collection.yaml
+#
+# Episode lifecycle:
+#   recorder.start_episode is called immediately and rotates every
+#   `episode_duration_s` seconds (default 300 s).  Rotation is deferred
+#   while CORRECTING so each boundary lands on a clean autonomous frame.
+#   Each frame's phase is stamped via the DAggerAgent's recorder hook.
+#
+# Sessions stop after `num_episodes` rotations, or on Ctrl+C.
+
+collection:
+  _target_: limb.recording.dagger_session.DAggerCollectionSession
+  num_episodes: 25
+  task_instruction: "intervention demonstrations"
+  # Optional: rotate to a new episode every N seconds (defaults to 300).
+  # episode_duration_s: 300.0
+  recorder:
+    _target_: limb.recording.episode_recorder.EpisodeRecorder
+    base_dir: "recordings"
+    recording_fps: 30
+    ee_frame_names:
+      left: "ee_link"
+      right: "ee_link"

@@ -1,0 +1,16 @@
+# Overlay over robot_configs/yam/left.yaml for a right-side LEADER arm in a
+# 4-YAM bilateral setup.  Loaded as the second entry in a `robots:` list:
+#
+#   leader_right: ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_right.yaml"]
+#
+# Adjust ``channel`` to match the CAN interface your right-leader arm is
+# wired to.
+motor_chain:
+  channel: "can_leader_r"
+  motor_chain_name: "yam_leader_right"
+# Log motor temperatures so we can debug thermal-cutoff drops (visible in obs as temp_rotor).
+temp_record_flag: true
+# Leader runs in zero_torque_mode + gravity comp.  See leader_left.yaml
+# for full notes on per-joint scaling.
+gravity_comp_factor: 1.0
+gravity_comp_per_joint_scale: [1.0, 1.0, 1.2, 1.35, 1.0, 1.0, 1.0]

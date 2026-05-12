@@ -19,6 +19,8 @@ ROBOT_PROTOCOL_METHODS = {
     "command_target_vel": False,
     "move_joints": False,
     "zero_torque_mode": False,
+    "position_mode": False,
+    "damped_compliant_mode": False,
     "soft_release": False,
 }
 

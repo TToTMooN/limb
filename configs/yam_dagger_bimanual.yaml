@@ -1,0 +1,73 @@
+# 4-YAM DAgger: human-in-the-loop policy correction.
+#
+# Layout: 2 follower YAMs (left, right) + 2 leader YAMs (leader_left,
+# leader_right).  In AUTONOMOUS the policy drives the followers and the
+# leaders mirror them in stiff position mode so there is no jolt when
+# the operator takes over.  In CORRECTING the leaders go to zero-torque
+# (operator backdrives) and the followers track the leaders via the
+# bilateral teleop agent.  PAUSED holds.
+#
+# Pedal bindings (PCsensor / iKKEGOL double pedal):
+#   left pedal  (KEY_A) -> pause_resume   (AUTONOMOUS <-> PAUSED)
+#   right pedal (KEY_B) -> correction     (PAUSED     <-> CORRECTING)
+#
+# This config is teleop+policy only — no recording.  Wire a `collection:`
+# block (milestone 3) when you want intervention frames written to disk.
+#
+# Launch:
+#   uv run limb teleop --config-path configs/yam_dagger_bimanual.yaml
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 100.0
+
+robots:
+  left:          ["robot_configs/yam/left.yaml"]
+  right:         ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+  leader_left:   ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_left.yaml"]
+  leader_right:  ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_right.yaml"]
+
+# Leaders boot in zero-torque so they don't hit motor 1 hard during init.
+# DAggerAgent flips them to position_mode on its first AUTONOMOUS tick so
+# they can stiff-track the followers from the start of the loop.
+release_at_startup:
+  - leader_left
+  - leader_right
+
+agent:
+  _target_: limb.agents.dagger.DAggerAgent
+  follower_keys: [left, right]
+  leader_keys:   [leader_left, leader_right]
+
+  inner_policy:
+    # TODO: replace with the policy you actually want to roll out.  This
+    # skeleton points at the same shape the existing yam_policy_bimanual
+    # config uses; fill in the client transport (OpenPI / WebSocket) and
+    # the obs/action transforms appropriate for your trained model.
+    _target_: limb.agents.policy_learning.policy_agent.YamPolicyAgent
+    action_horizon: 25
+    smoothing_window: 4
+    async_inference: true
+    # client / obs_transform / action_transform: configure per-policy.
+
+  inner_teleop:
+    _target_: limb.agents.teleoperation.yam_yam_bilateral_agent.YamYamBilateralAgent
+    follower_keys: [left, right]
+    leader_keys:   [leader_left, leader_right]
+    joint_signs:   [1, 1, 1, 1, 1, 1]
+    gripper_passthrough: true
+
+  phase_trigger:
+    _target_: limb.agents.dagger.FootPedalPhaseTrigger
+    device_path: "auto"
+    # PCsensor double-pedal default IDs; override if yours differs.
+    vendor_id:  0x3553
+    product_id: 0xb001
+    pause_resume_key: "KEY_A"
+    correction_key:   "KEY_B"
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]

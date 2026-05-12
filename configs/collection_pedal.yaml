@@ -9,10 +9,12 @@
 # Keyboard fallback:
 #   Space / Enter / S / D / Q  →  same as collection.yaml
 
+enable_monitor: false
+
 collection:
   _target_: limb.recording.session.DataCollectionSession
-  num_episodes: 10
-  task_instruction: "pick up the grey cube and hand it to another hand"
+  num_episodes: 25
+  task_instruction: "place the vial into the stand"
   countdown_s: 0
   recorder:
     _target_: limb.recording.episode_recorder.EpisodeRecorder

@@ -13,11 +13,11 @@ sensors:
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
             serial_number: "409122274543"
-    # head_camera:
-    #     _target_: limb.sensors.cameras.camera.CameraNode
-    #     camera:
-    #         _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
-    #         serial_number: "215122256240"
+    head_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "215122256240"
 
 robots:
   left: ["robot_configs/yam/left.yaml"]

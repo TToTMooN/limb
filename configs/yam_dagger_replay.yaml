@@ -1,0 +1,69 @@
+# DAgger with EPISODE REPLAY as the autonomous "policy".
+#
+# AUTONOMOUS  -> follower arms retrace the recorded trajectory; leaders
+#                mirror them in stiff position mode.
+# PAUSED      -> step pointer frozen; everything holds.
+# CORRECTING  -> bilateral teleop drives followers via the leaders.  When
+#                AUTO resumes, the replay continues from where it was
+#                paused (not rewound).
+#
+# Use this to verify DAgger end-to-end without a policy server, or to
+# generate correction data over a known-good trajectory.  Stack with
+# configs/dagger_collection.yaml to record each correction window.
+#
+# Usage:
+#   uv run limb teleop --config-path configs/yam_dagger_replay.yaml
+#   # …or to record corrections against the replay:
+#   uv run limb record --config-path configs/yam_dagger_replay.yaml \
+#                                    configs/dagger_collection.yaml
+#
+# IMPORTANT: edit `inner_policy.episode_dir` below to point at one of your
+# recorded episodes (e.g. an output of test 5).  The episode must have
+# matching arm keys (`left`, `right`) and roughly the same control rate
+# (default 100 Hz) as this config.
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 100.0
+
+robots:
+  left:          ["robot_configs/yam/left.yaml"]
+  right:         ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+  leader_left:   ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_left.yaml"]
+  leader_right:  ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_right.yaml"]
+
+release_at_startup:
+  - leader_left
+  - leader_right
+
+agent:
+  _target_: limb.agents.dagger.DAggerAgent
+  follower_keys: [left, right]
+  leader_keys:   [leader_left, leader_right]
+
+  inner_policy:
+    _target_: limb.agents.replay_agent.EpisodeReplayAgent
+    episode_dir: "/home/benyang/limb/recordings/place_the_vial_into_the_stand_combined2_flat/episode_20260507_185313_0002"
+    on_end: "hold"            # "hold" | "loop" | "stop"
+    # arm_keys: [left, right] # optional: restrict to a subset of arms
+
+  inner_teleop:
+    _target_: limb.agents.teleoperation.yam_yam_bilateral_agent.YamYamBilateralAgent
+    follower_keys: [left, right]
+    leader_keys:   [leader_left, leader_right]
+    joint_signs:   [1, 1, 1, 1, 1, 1]
+    gripper_passthrough: true
+
+  phase_trigger:
+    _target_: limb.agents.dagger.FootPedalPhaseTrigger
+    device_path: "auto"
+    vendor_id:  0x3553
+    product_id: 0xb001
+    pause_resume_key: "KEY_A"
+    correction_key:   "KEY_B"
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]

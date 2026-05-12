@@ -1,0 +1,41 @@
+# 4-YAM bilateral teleoperation: leader arms drive follower arms.
+#
+# The two leader YAMs are placed in zero-torque mode at startup
+# (``release_at_startup``) so the operator can backdrive them freely.
+# The two follower YAMs stay under PID position control and mirror the
+# leaders' joint positions every tick.
+#
+# This config is the foundation for DAgger: in CORRECTING phase the
+# system behaves exactly like this config, so getting bilateral working
+# first de-risks the state machine.
+#
+# Launch:
+#   uv run limb teleop --config-path configs/yam_bilateral_bimanual.yaml
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 100.0
+
+robots:
+  left:          ["robot_configs/yam/left.yaml"]
+  right:         ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+  leader_left:   ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_left.yaml"]
+  leader_right:  ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_right.yaml"]
+
+# Leaders are operator-backdriven; release them so they're free to move.
+release_at_startup:
+  - leader_left
+  - leader_right
+
+agent:
+  _target_: limb.agents.teleoperation.yam_yam_bilateral_agent.YamYamBilateralAgent
+  follower_keys: [left, right]
+  leader_keys:   [leader_left, leader_right]
+  joint_signs:   [1, 1, 1, 1, 1, 1]
+  gripper_passthrough: true
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]

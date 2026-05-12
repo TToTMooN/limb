@@ -188,8 +188,18 @@ class EpisodeRecorder:
 
             self._step_idx = 0
             self._timestamps = []
+            self._interventions: List[bool] = []
+            # RECAP-style phase tracking. Default phase is "autonomous" so a
+            # non-DAgger recorder run still produces a valid phases.npy file
+            # (all-autonomous) that downstream tooling can rely on existing.
+            self._phases: List[str] = []
+            self._correction_indices: List[int] = []
             self._arm_states = {}
             self._actions = {}
+            # Per-arm raw policy-target stream (commanded action is in
+            # self._actions["pos"]). Differs during the resume-blend window;
+            # equal outside it; absent in non-DAgger / teleop runs.
+            self._policy_actions: Dict[str, Dict[str, List[np.ndarray]]] = {}
             self._writers = {}
             self._cam_timestamps = {}
             self._metadata = metadata or {}
@@ -212,18 +222,43 @@ class EpisodeRecorder:
             logger.info("Episode recording started -> {}", self._episode_dir)
             return self._episode_dir
 
-    def record(self, obs: Observation, action: Dict[str, Any]) -> None:
+    def record(self, obs: Observation, action: Dict[str, Any], *, intervention: bool = False) -> None:
         """Record one timestep of observation + action.
 
         Args:
             obs: Typed Observation from RobotEnv.
-            action: Action dict as returned by agent.act().
+            action: Action dict as returned by agent.act(). May contain the
+                following non-arm metadata keys (consumed by this recorder
+                and stripped before any other use):
+
+                - ``_phase``: "autonomous" | "paused" | "correcting"
+                - ``_correction_index``: int — increments on each entry into
+                  CORRECTING; 0 baseline.
+                - per-arm ``policy_pos``: the policy's raw target before the
+                  resume-blend window. Outside the blend it equals ``pos``.
+
+                Saved to ``phase.npy``, ``correction_index.npy``, and
+                ``{arm}_policy_actions.npz`` respectively.
+            intervention: legacy boolean kept for non-DAgger callers. If
+                ``_phase`` is present on the action dict it takes precedence.
         """
         with self._lock:
             if not self._recording:
                 return
 
+            # Phase metadata: prefer DAggerAgent's stamped values if present.
+            phase = action.get("_phase")
+            correction_idx = action.get("_correction_index", 0)
+            if phase is None:
+                phase = "correcting" if intervention else "autonomous"
+                derived_intervention = bool(intervention)
+            else:
+                derived_intervention = (phase == "correcting")
+
             self._timestamps.append(obs.timestamp)
+            self._interventions.append(derived_intervention)
+            self._phases.append(str(phase))
+            self._correction_indices.append(int(correction_idx))
 
             # Record arm states
             for arm_name, arm_obs in obs.arms.items():
@@ -241,8 +276,15 @@ class EpisodeRecorder:
                 if arm_obs.ee_pose is not None:
                     self._arm_states[arm_name]["ee_pose"].append(arm_obs.ee_pose.copy())
 
-            # Record actions
+            # Record actions (and the policy_pos shadow stream when present).
+            # For composite agents like DAggerAgent the action dict can be {}
+            # (PAUSED) or omit specific arms (leaders during CORRECTING). The
+            # physical robot holds the last commanded position via PD in those
+            # cases, so we record the same thing — the previous tick's value —
+            # so every action array stays aligned with timestamps / states.
             for arm_name, arm_action in action.items():
+                if isinstance(arm_name, str) and arm_name.startswith("_"):
+                    continue  # phase metadata handled above
                 if not isinstance(arm_action, dict):
                     continue
                 if arm_name not in self._actions:
@@ -251,6 +293,28 @@ class EpisodeRecorder:
                     self._actions[arm_name].setdefault("pos", []).append(np.asarray(arm_action["pos"]))
                 if "vel" in arm_action:
                     self._actions[arm_name].setdefault("vel", []).append(np.asarray(arm_action["vel"]))
+                if "policy_pos" in arm_action:
+                    self._policy_actions.setdefault(arm_name, {}).setdefault(
+                        "pos", []
+                    ).append(np.asarray(arm_action["policy_pos"]))
+
+            # Hold-the-last-value padding for arms that were silent this tick.
+            # The physical command was "hold last commanded position" (PD on
+            # the env side), so the recorded action stream stays causally
+            # consistent with what the robot actually did.
+            target_len = self._step_idx + 1
+
+            def _pad_to_target(store: Dict[str, Dict[str, List[np.ndarray]]]) -> None:
+                for arm_store in store.values():
+                    for history in arm_store.values():
+                        while len(history) < target_len:
+                            if history:
+                                history.append(history[-1].copy())
+                            else:
+                                break  # arm never seen yet — leave the gap
+
+            _pad_to_target(self._actions)
+            _pad_to_target(self._policy_actions)
 
             # Record camera frames as video (async, NVENC when available)
             for cam_name, cam_obs in obs.cameras.items():
@@ -291,6 +355,27 @@ class EpisodeRecorder:
         # Save timestamps
         np.save(str(episode_dir / "timestamps.npy"), np.array(self._timestamps, dtype=np.float64))
 
+        # Save per-tick intervention flags (DAgger): True iff frame was an
+        # operator correction.  Always written so episode shape is uniform
+        # regardless of whether the agent supports interventions.
+        interventions_arr = np.asarray(self._interventions, dtype=bool)
+        np.save(str(episode_dir / "interventions.npy"), interventions_arr)
+
+        # Richer phase + correction tracking (RECAP-style). phase.npy is the
+        # categorical equivalent of interventions.npy with PAUSED distinguished
+        # from AUTONOMOUS; correction_index.npy lets downstream tools group
+        # frames into discrete correction episodes.
+        if self._phases:
+            np.save(
+                str(episode_dir / "phase.npy"),
+                np.asarray(self._phases, dtype=np.dtype("U16")),
+            )
+        if self._correction_indices:
+            np.save(
+                str(episode_dir / "correction_index.npy"),
+                np.asarray(self._correction_indices, dtype=np.int32),
+            )
+
         # Save per-camera timestamps
         for cam_name, cam_ts in self._cam_timestamps.items():
             np.save(str(episode_dir / f"{cam_name}_timestamps.npy"), np.array(cam_ts, dtype=np.float64))
@@ -313,6 +398,16 @@ class EpisodeRecorder:
             if arrays:
                 np.savez(str(episode_dir / f"{arm_name}_actions.npz"), **arrays)
 
+        # Save the policy_pos shadow stream (DAgger / composite agents only;
+        # files are skipped when empty so non-DAgger recordings stay clean).
+        for arm_name, action_dict in self._policy_actions.items():
+            arrays = {}
+            for key, val_list in action_dict.items():
+                if val_list:
+                    arrays[key] = np.stack(val_list)
+            if arrays:
+                np.savez(str(episode_dir / f"{arm_name}_policy_actions.npz"), **arrays)
+
         # Save metadata
         self._metadata["end_time"] = time.time()
         self._metadata["num_steps"] = self._step_idx
@@ -320,6 +415,11 @@ class EpisodeRecorder:
         self._metadata["recording_fps"] = self.recording_fps
         self._metadata["cameras"] = list(self._cam_timestamps.keys())
         self._metadata["arms"] = list(self._arm_states.keys())
+        intervention_count = int(interventions_arr.sum())
+        self._metadata["intervention_count"] = intervention_count
+        self._metadata["intervention_fraction"] = (
+            intervention_count / len(interventions_arr) if len(interventions_arr) > 0 else 0.0
+        )
         if self.robot_configs is not None:
             self._metadata["robot_configs"] = self.robot_configs
         with open(str(episode_dir / "metadata.json"), "w") as f:
