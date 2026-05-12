@@ -172,7 +172,11 @@ class DAggerAgent(Agent):
     def reset(self) -> None:
         """Reset the phase machine and the inner policy.  Does NOT reset hardware."""
         self._events.reset(DAggerPhase.AUTONOMOUS)
-        self._leader_mode_to_emit = "position"
+        # Queue a leader -> position payload so the next act() restores PD
+        # gains on the leaders.  Reset typically fires after a CORRECTING
+        # handoff that put the leaders in zero-torque mode; without this the
+        # mirrored `pos` commands wouldn't actually hold the leaders.
+        self._leader_mode_payload = {"mode": "position"}
         if hasattr(self.inner_policy, "reset"):
             self.inner_policy.reset()
 

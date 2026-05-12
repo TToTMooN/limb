@@ -208,6 +208,12 @@ def main(args: Args) -> None:
     total_data_bytes = 0
     total_video_bytes = 0
     per_episode_output_fps: List[float] = []
+    # Track whether ANY episode contributed DAgger phase/correction columns
+    # so info.json's `features` map can advertise them.  Consumers that
+    # build a schema from info.json would otherwise silently lose these
+    # columns even though they're present in the parquet.
+    has_phase_column = False
+    has_correction_index_column = False
     zoh_dims = tuple(int(d) for d in args.nearest_action_dims)
 
     # ---- Phase 1: heavy work (load + resample + video re-encode) ----
@@ -358,10 +364,12 @@ def main(args: Args) -> None:
             phase_arr = np.asarray(res["phase"])
             if len(phase_arr) >= n_steps_out:
                 table_data["phase"] = pa.array(phase_arr[:n_steps_out].astype(str).tolist())
+                has_phase_column = True
         if res.get("correction_index") is not None:
             ci = np.asarray(res["correction_index"])
             if len(ci) >= n_steps_out:
                 table_data["correction_index"] = pa.array(ci[:n_steps_out].astype(np.int32))
+                has_correction_index_column = True
         table = pa.table(table_data)
         parquet_path = data_dir / f"file-{ep_idx:03d}.parquet"
         pq.write_table(table, str(parquet_path), compression="snappy")
@@ -463,6 +471,13 @@ def main(args: Args) -> None:
                 "has_audio": False,
             },
         }
+    # DAgger metadata columns — only advertised when at least one episode in
+    # this dataset actually contributed them, mirroring the per-episode
+    # append above so non-DAgger datasets stay schema-clean.
+    if has_phase_column:
+        features["phase"] = {"dtype": "string", "shape": [1], "names": None, "fps": info_fps}
+    if has_correction_index_column:
+        features["correction_index"] = {"dtype": "int32", "shape": [1], "names": None, "fps": info_fps}
 
     info = {
         "codebase_version": CODEBASE_VERSION,
