@@ -112,7 +112,10 @@ class YamPolicyAgent(PolicyAgent):
 
             # If reset() fired while we were inferring (DAgger takeover, etc.),
             # this chunk is based on a pre-takeover observation — drop it
-            # rather than letting it leak into the buffer post-reset.
+            # rather than letting it leak into the buffer post-reset.  Hold
+            # the lock across both the gen check AND the buffer update so
+            # reset() can't slip between them and let a stale chunk repopulate
+            # a just-cleared buffer.
             with self._obs_lock:
                 if request_gen != self._generation:
                     logger.debug(
@@ -122,8 +125,7 @@ class YamPolicyAgent(PolicyAgent):
                     )
                     continue
                 elapsed_steps = self._step_counter - request_step
-
-            self._chunk_mgr.update(actions, steps_since_request=elapsed_steps)
+                self._chunk_mgr.update(actions, steps_since_request=elapsed_steps)
 
             if self._inference_rate is not None:
                 self._inference_rate.sleep()
@@ -159,8 +161,13 @@ class YamPolicyAgent(PolicyAgent):
         background inference thread will populate a fresh chunk on the next
         observation.
         """
-        self._chunk_mgr.reset()
+        # Clear the chunk buffer AND bump the generation atomically with the
+        # inference loop's gen-check/update region.  This guarantees an
+        # in-flight async inference is either fully rejected by the gen check
+        # or fully applied before we wipe it — never half-applied after the
+        # reset returns.
         with self._obs_lock:
+            self._chunk_mgr.reset()
             self._latest_obs = None
             self._step_counter = 0
             self._generation += 1
