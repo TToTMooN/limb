@@ -208,12 +208,6 @@ def main(args: Args) -> None:
     total_data_bytes = 0
     total_video_bytes = 0
     per_episode_output_fps: List[float] = []
-    # Track whether ANY episode contributed DAgger phase/correction columns
-    # so info.json's `features` map can advertise them.  Consumers that
-    # build a schema from info.json would otherwise silently lose these
-    # columns even though they're present in the parquet.
-    has_phase_column = False
-    has_correction_index_column = False
     zoh_dims = tuple(int(d) for d in args.nearest_action_dims)
 
     # ---- Phase 1: heavy work (load + resample + video re-encode) ----
@@ -364,12 +358,10 @@ def main(args: Args) -> None:
             phase_arr = np.asarray(res["phase"])
             if len(phase_arr) >= n_steps_out:
                 table_data["phase"] = pa.array(phase_arr[:n_steps_out].astype(str).tolist())
-                has_phase_column = True
         if res.get("correction_index") is not None:
             ci = np.asarray(res["correction_index"])
             if len(ci) >= n_steps_out:
                 table_data["correction_index"] = pa.array(ci[:n_steps_out].astype(np.int32))
-                has_correction_index_column = True
         table = pa.table(table_data)
         parquet_path = data_dir / f"file-{ep_idx:03d}.parquet"
         pq.write_table(table, str(parquet_path), compression="snappy")
@@ -406,6 +398,31 @@ def main(args: Args) -> None:
     if n_episodes == 0:
         logger.error("All episodes were empty")
         raise SystemExit(1)
+
+    # DAgger phase/correction columns are advertised in info.json only when
+    # *every* processed episode contributed them.  In a mixed input (some
+    # DAgger, some plain-teleop episodes) we'd otherwise declare a feature
+    # in the schema that some per-episode parquet shards don't actually
+    # have, leaving consumers that build their reads from info.json with
+    # missing columns.  Per-episode parquets still carry the column where
+    # the source has it — we just don't advertise it dataset-wide.
+    n_with_phase = sum(1 for res in results_by_idx.values() if res.get("phase") is not None)
+    n_with_correction = sum(1 for res in results_by_idx.values() if res.get("correction_index") is not None)
+    advertise_phase = n_with_phase == len(results_by_idx) and n_with_phase > 0
+    advertise_correction = n_with_correction == len(results_by_idx) and n_with_correction > 0
+    if 0 < n_with_phase < len(results_by_idx):
+        logger.warning(
+            "Only {}/{} episodes have phase.npy — omitting 'phase' from info.json features "
+            "to keep the dataset schema consistent. Per-episode parquets still carry the column where available.",
+            n_with_phase,
+            len(results_by_idx),
+        )
+    if 0 < n_with_correction < len(results_by_idx):
+        logger.warning(
+            "Only {}/{} episodes have correction_index.npy — omitting 'correction_index' from info.json features.",
+            n_with_correction,
+            len(results_by_idx),
+        )
 
     # --- Write meta/tasks.parquet ---
     tasks_df = pd.DataFrame({"task_index": [0]}, index=pd.Index([task], name="task"))
@@ -471,12 +488,12 @@ def main(args: Args) -> None:
                 "has_audio": False,
             },
         }
-    # DAgger metadata columns — only advertised when at least one episode in
-    # this dataset actually contributed them, mirroring the per-episode
-    # append above so non-DAgger datasets stay schema-clean.
-    if has_phase_column:
+    # DAgger metadata columns — only advertised when every processed episode
+    # contributed them, so the dataset schema doesn't claim a column that
+    # some per-episode shards lack.  Mixed input warns above.
+    if advertise_phase:
         features["phase"] = {"dtype": "string", "shape": [1], "names": None, "fps": info_fps}
-    if has_correction_index_column:
+    if advertise_correction:
         features["correction_index"] = {"dtype": "int32", "shape": [1], "names": None, "fps": info_fps}
 
     info = {
