@@ -985,8 +985,8 @@ requires-dist = [
     { name = "qpsolvers", extras = ["quadprog"] },
     { name = "rerun-sdk", specifier = "==0.30.1" },
     { name = "rich" },
-    { name = "robocam", editable = "../robocam" },
-    { name = "robocam", marker = "extra == 'all'", editable = "../robocam" },
+    { name = "robocam", git = "https://github.com/TToTMooN/robocam.git?rev=7284ce3a7fb762ac9497b95beea8782095c9a7a2" },
+    { name = "robocam", marker = "extra == 'all'", git = "https://github.com/TToTMooN/robocam.git?rev=7284ce3a7fb762ac9497b95beea8782095c9a7a2" },
     { name = "robot-descriptions" },
     { name = "ruff" },
     { name = "tyro" },
@@ -1865,7 +1865,7 @@ wheels = [
 [[package]]
 name = "robocam"
 version = "0.1.0"
-source = { editable = "../robocam" }
+source = { git = "https://github.com/TToTMooN/robocam.git?rev=7284ce3a7fb762ac9497b95beea8782095c9a7a2#7284ce3a7fb762ac9497b95beea8782095c9a7a2" }
 dependencies = [
     { name = "loguru" },
     { name = "numpy" },
@@ -1874,19 +1874,6 @@ dependencies = [
     { name = "pyrealsense2" },
     { name = "pyzed" },
     { name = "tyro" },
-    { name = "viser" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "loguru" },
-    { name = "numpy" },
-    { name = "opencv-contrib-python" },
-    { name = "pillow" },
-    { name = "pyrealsense2" },
-    { name = "pyzed", url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" },
-    { name = "tyro" },
-    { name = "viser" },
 ]
 
 [[package]]
