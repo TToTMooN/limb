@@ -60,12 +60,20 @@ class RobotEnv(dm_env.Environment):
         # entering position_mode has its PD gains restored before its first
         # tracked target arrives.  `mode` is idempotent on the robot side and
         # is typically only set by composite agents on phase transitions.
+        #
+        # An optional ``gripper_spring`` sub-block on the same entry is
+        # applied immediately AFTER the arm mode switch, so the gripper PD
+        # spring layers on top of whatever ``mode`` configured (typically
+        # zero_torque / compliant).  It touches only the gripper slot, so
+        # the arm's backdrive behavior is preserved.
         for name, action in action_dict.items():
-            if isinstance(action, dict) and "mode" in action:
+            if not isinstance(action, dict):
+                continue
+            robot = self._robot_dict.get(name)
+            if robot is None:
+                continue
+            if "mode" in action:
                 mode = action["mode"]
-                robot = self._robot_dict.get(name)
-                if robot is None:
-                    continue
                 if mode == "zero_torque":
                     robot.zero_torque_mode()
                 elif mode == "position":
@@ -75,6 +83,17 @@ class RobotEnv(dm_env.Environment):
                     robot.damped_compliant_mode(kd_scale)
                 else:
                     logger.warning(f"Unknown mode '{mode}' for robot '{name}' — ignoring")
+            spring = action.get("gripper_spring")
+            if isinstance(spring, dict):
+                # Positional args only — Portal RPC's Client.call() doesn't
+                # forward kwargs, so passing spring_torque_bias=... raises
+                # "unexpected keyword argument" through the proxy.
+                robot.gripper_spring_mode(
+                    float(spring["target_rad"]),
+                    float(spring["kp"]),
+                    float(spring["kd"]),
+                    float(spring.get("torque_bias", 0.0)),
+                )
 
         with return_futures(*self._robot_dict.values()):  # type: ignore
             for name, action in action_dict.items():

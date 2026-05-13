@@ -21,6 +21,7 @@ ROBOT_PROTOCOL_METHODS = {
     "zero_torque_mode": False,
     "position_mode": False,
     "damped_compliant_mode": False,
+    "gripper_spring_mode": False,
     "soft_release": False,
 }
 

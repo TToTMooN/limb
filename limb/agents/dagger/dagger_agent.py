@@ -82,6 +82,53 @@ class DAggerAgent(Agent):
     # "everything frozen" state regardless of which phase you came from.
     pause_stiffens_leader: bool = True
 
+    # Optional PD spring on the LEADER gripper joint during CORRECTING.
+    # When ``gripper_spring_target_rad`` is set, the CORRECTING transition
+    # layers a gripper-only PD spring on top of the arm mode (zero_torque or
+    # compliant — driven by ``correcting_kd_scale``).  Arm joint behavior is
+    # untouched; only the gripper slot of kp/kd/cmd is rewritten.  The
+    # operator feels the gripper auto-return when they release the trigger,
+    # while the arm remains fully backdrivable.  PAUSED-from-CORRECTING
+    # clears the spring automatically via ``position_mode`` (which restores
+    # the initial per-joint kp/kd).
+    #
+    # ``gripper_spring_target_rad`` is in RAW motor radians (same units as
+    # ``gripper_limits`` in the leader's robot YAML).  Example: with the
+    # YAM trigger calibrated to ``gripper_limits: [0.0, -5.2]``, a value of
+    # ``-2.8`` is the spring rest, roughly 54% of the way to fully open.
+    # ``gripper_spring_lower_rad`` is the closed-side bound of the leader's
+    # effective operating range — operator squeezes can bring the leader
+    # past this value but the rescale treats anything more positive than
+    # ``lower_rad`` as "follower fully closed".
+    # ``gripper_spring_open_rad`` is the leader's fully-open raw position
+    # (the second element of its ``gripper_limits``).  Together with
+    # ``lower_rad`` and ``target_rad`` it parameterizes the leader-to-
+    # follower rescale in :meth:`_rescale_leader_gripper`.
+    # ``kp``/``kd`` are in raw motor units.  Default ``None`` on the target
+    # keeps the feature opt-in.  The non-None defaults below mirror the
+    # tuned values in configs/yam_dagger_spring_test.yaml.
+    gripper_spring_target_rad: Optional[float] = None
+    gripper_spring_lower_rad: float = -0.42
+    gripper_spring_open_rad: float = -5.2
+    gripper_spring_kp: float = 0.15
+    gripper_spring_kd: float = 0.03
+    # Constant feedforward Nm added to the gripper motor while the spring is
+    # active.  Compensates static friction in the gripper linkage so the
+    # spring reliably returns to ``gripper_spring_target_rad`` instead of
+    # stalling near the operator's last hold position.  Sign matches the
+    # motor: with ``gripper_limits: [0.0, -5.2]`` (open is more negative), a
+    # *negative* bias pushes toward open.  Cleared automatically on the
+    # CORRECTING -> PAUSED transition.
+    gripper_spring_torque_bias: float = -0.05
+
+    # Phase the state machine boots into.  Default ``"autonomous"`` matches
+    # the normal DAgger workflow (policy drives followers from tick 1).
+    # Set to ``"paused"`` for tests that want to skip the policy roundtrip
+    # entirely — from PAUSED the operator can only enter CORRECTING via
+    # the correction pedal, so ``inner_policy`` is never invoked.  Useful
+    # for bringing up the gripper-spring path without a policy server.
+    initial_phase: str = "autonomous"
+
     use_joint_state_as_action: bool = False
 
     def __post_init__(self) -> None:
@@ -94,7 +141,14 @@ class DAggerAgent(Agent):
         if self.inner_policy is None or self.inner_teleop is None or self.phase_trigger is None:
             raise ValueError("DAggerAgent requires inner_policy, inner_teleop, and phase_trigger")
 
-        self._events = DAggerEvents(initial_phase=DAggerPhase.AUTONOMOUS)
+        try:
+            boot_phase = DAggerPhase(self.initial_phase)
+        except ValueError as e:
+            raise ValueError(
+                f"initial_phase must be one of {[p.value for p in DAggerPhase]}; "
+                f"got {self.initial_phase!r}"
+            ) from e
+        self._events = DAggerEvents(initial_phase=boot_phase)
         self.phase_trigger.start(self._events)
 
         # Leaders are released by `release_at_startup` in launch_utils.  On the
@@ -113,6 +167,31 @@ class DAggerAgent(Agent):
         # blend has elapsed.  ``None`` means no ramp is currently active.
         self._ramp_start_time: Optional[float] = None
         self._ramp_start_pose: Optional[Dict[str, np.ndarray]] = None
+
+        # Precompute gripper-spring rescale constants.  Validating here (rather
+        # than per-tick in _rescale_leader_gripper) surfaces misconfiguration
+        # at launch time instead of silently disabling the rescale at 100 Hz.
+        self._spring_enabled: bool = False
+        self._spring_lower_norm: float = 0.0
+        self._spring_span: float = 1.0
+        if self.gripper_spring_target_rad is not None:
+            open_rad = float(self.gripper_spring_open_rad)
+            if open_rad == 0.0:
+                raise ValueError("gripper_spring_open_rad must be non-zero")
+            target_norm = float(self.gripper_spring_target_rad) / open_rad
+            lower_norm = float(self.gripper_spring_lower_rad) / open_rad
+            if not (0.0 <= lower_norm < target_norm <= 1.0):
+                raise ValueError(
+                    "gripper spring bounds invalid: normalized "
+                    f"lower={lower_norm:.4f}, target={target_norm:.4f} "
+                    "must satisfy 0 <= lower < target <= 1 "
+                    f"(rads: lower={self.gripper_spring_lower_rad}, "
+                    f"target={self.gripper_spring_target_rad}, "
+                    f"open={self.gripper_spring_open_rad})"
+                )
+            self._spring_enabled = True
+            self._spring_lower_norm = lower_norm
+            self._spring_span = target_norm - lower_norm
 
         logger.info(
             "DAggerAgent: followers={} leaders={} initial_phase={}",
@@ -245,12 +324,22 @@ class DAggerAgent(Agent):
             # whatever inner_teleop returns this tick.  Use damped-compliant
             # if the operator opted into it; otherwise bare zero-torque.
             if self.correcting_kd_scale > 0.0:
-                self._leader_mode_payload = {
+                payload: Dict[str, Any] = {
                     "mode": "compliant",
                     "kd_scale": float(self.correcting_kd_scale),
                 }
             else:
-                self._leader_mode_payload = {"mode": "zero_torque"}
+                payload = {"mode": "zero_torque"}
+            # Optional gripper PD spring layered on top of the arm mode.
+            # Gripper-only — does not affect arm kp/kd/commands.
+            if self.gripper_spring_target_rad is not None:
+                payload["gripper_spring"] = {
+                    "target_rad": float(self.gripper_spring_target_rad),
+                    "kp": float(self.gripper_spring_kp),
+                    "kd": float(self.gripper_spring_kd),
+                    "torque_bias": float(self.gripper_spring_torque_bias),
+                }
+            self._leader_mode_payload = payload
 
         elif old_phase is DAggerPhase.CORRECTING and new_phase is DAggerPhase.PAUSED and self.pause_stiffens_leader:
             # Re-stiffen the leader at its current observed pose so it doesn't
@@ -373,5 +462,44 @@ class DAggerAgent(Agent):
 
         Leaders are released (zero_torque) and not in the action dict, so the
         env's PD controllers won't fight the operator.
+
+        When the gripper spring is active, the leader's effective operating
+        range shrinks to ``[gripper_spring_lower, gripper_spring_target]``
+        (both in normalized [0, 1] obs space): the spring pulls the trigger
+        back to ``gripper_spring_target`` on release, and ``lower`` is the
+        closed-side bound of the operator's effective squeeze (squeezes
+        past it clip).  Without correction the follower would only open to
+        ``gripper_spring_target`` of its mechanical range.  We pass a
+        shallow copy of ``obs`` with the leader's ``gripper_pos`` rescaled
+        from ``[lower, target]`` onto ``[0, 1]`` (clipped) into the
+        bilateral agent so the follower sees a full sweep across the
+        operator's full trigger throw.  The original ``obs`` is unchanged
+        so the recorder still stores the raw leader gripper reading.
         """
-        return self.inner_teleop.act(obs)
+        return self.inner_teleop.act(self._rescale_leader_gripper(obs))
+
+    def _rescale_leader_gripper(self, obs: Dict[str, Any]) -> Dict[str, Any]:
+        """Map the leader's effective ``[lower_norm, target_norm]`` trigger
+        throw onto the follower's full ``[0, 1]`` command space.
+
+        Constants (`_spring_lower_norm`, `_spring_span`) and the
+        enabled/disabled gate are computed once in ``__post_init__`` so this
+        runs flat per tick.  When disabled, returns ``obs`` unchanged.
+        """
+        if not self._spring_enabled:
+            return obs
+        new_obs: Dict[str, Any] = dict(obs)
+        for lkey in self.leader_keys:
+            arm = new_obs.get(lkey)
+            if not isinstance(arm, dict):
+                continue
+            grip = arm.get("gripper_pos")
+            if grip is None:
+                continue
+            rescaled = np.clip(
+                (np.asarray(grip, dtype=np.float64) - self._spring_lower_norm) / self._spring_span,
+                0.0,
+                1.0,
+            )
+            new_obs[lkey] = {**arm, "gripper_pos": rescaled}
+        return new_obs

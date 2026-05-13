@@ -4,10 +4,14 @@ Utilities for launching and configuring robots, sensors, and agents.
 
 import logging
 import multiprocessing
+import os
 import subprocess
 import sys
+import threading
 import time
+from datetime import datetime
 from functools import partial
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import omegaconf
@@ -51,27 +55,74 @@ def run_server_proc(api_cfg) -> multiprocessing.Process:
     return proc
 
 
-def setup_logging(level: str = "INFO") -> None:
+def setup_logging(level: str = "INFO", log_dir: Optional[str] = None, stderr: bool = True) -> None:
     """Configure loguru as the sole logging backend.
 
     Replaces the default loguru sink with a clean format and installs an
     intercept handler so that stdlib ``logging`` calls from third-party
     libraries (portal, omegaconf, etc.) are routed through loguru.
+
+    Also adds a file sink under ``log_dir`` (default ``./logs/``).  Files are
+    named ``limb_<session>_pid<PID>.log`` where ``<session>`` is a timestamp
+    shared by the parent process and any Portal subprocesses launched in the
+    same run (the parent's ``LIMB_LOG_SESSION`` env var is inherited).  Each
+    process gets its own file so writers don't race on a shared sink — to
+    correlate a crash across processes, look for files with the same session
+    prefix.  ``LIMB_LOG_DIR`` overrides ``log_dir``.
+
+    Pass ``stderr=False`` for Portal subprocesses: their stderr writes would
+    otherwise clobber the parent process's Rich Live TUI (the i2rt motor
+    server logs from inside the robot subprocess, for example).  Subprocess
+    logs still hit the per-PID log file, so nothing is lost — just tail
+    ``logs/limb_<session>_pid<PID>.log`` to debug a subprocess.
+
+    A ``threading.excepthook`` is installed so unhandled exceptions in
+    background threads (e.g. the i2rt motor-chain server thread raising a
+    joint-limit ``RuntimeError``) are routed through loguru and captured in
+    the log file instead of disappearing into subprocess stderr.
     """
     logger.remove()
+    if stderr:
+        logger.add(
+            sys.stderr,
+            format="<level>{time:HH:mm:ss.SSS} | {level:<7} | {file}:{line} - {message}</level>",
+            level=level.upper(),
+            colorize=True,
+            filter={"robocam.video_writer": "WARNING"},
+        )
+
+    log_dir_path = Path(log_dir or os.environ.get("LIMB_LOG_DIR", "logs"))
+    log_dir_path.mkdir(parents=True, exist_ok=True)
+    session = os.environ.setdefault("LIMB_LOG_SESSION", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    log_path = log_dir_path / f"limb_{session}_pid{os.getpid()}.log"
     logger.add(
-        sys.stderr,
-        format="<level>{time:HH:mm:ss.SSS} | {level:<7} | {file}:{line} - {message}</level>",
-        level=level.upper(),
-        colorize=True,
-        filter={"robocam.video_writer": "WARNING"},
+        str(log_path),
+        format="{time:HH:mm:ss.SSS} | {level:<7} | pid={process} {thread.name} | {file}:{line} - {message}",
+        level="DEBUG",
+        enqueue=True,
+        rotation="200 MB",
+        retention="7 days",
     )
+    logger.info(f"Log file: {log_path}")
 
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
 
     # Suppress noisy third-party stdlib loggers
     for name in ("portal", "portal.client", "portal.server", "viser", "httpcore", "uvicorn"):
         logging.getLogger(name).setLevel(logging.WARNING)
+
+    # Route unhandled thread exceptions through loguru so they hit the file
+    # sink.  Without this, the i2rt motor-chain server thread raising a
+    # joint-limit RuntimeError prints a traceback to subprocess stderr only
+    # (and the TUI's Rich Live panel can clobber it).
+    def _thread_excepthook(args: threading.ExceptHookArgs) -> None:  # type: ignore[name-defined]
+        if issubclass(args.exc_type, SystemExit):
+            return
+        logger.opt(exception=(args.exc_type, args.exc_value, args.exc_traceback)).error(
+            f"Unhandled exception in thread {args.thread.name if args.thread else '?'}"
+        )
+
+    threading.excepthook = _thread_excepthook
 
 
 def setup_can_interfaces():

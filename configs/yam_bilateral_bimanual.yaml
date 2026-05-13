@@ -25,6 +25,10 @@ robots:
 release_at_startup:
   - leader_left
   - leader_right
+# Gravity comp + viscous damping on the leaders instead of pure zero_torque.
+# kd = kd_scale * initial_kd suppresses ringing without restoring position
+# tracking (kp stays 0).
+release_kd_scale: 0.0
 
 agent:
   _target_: limb.agents.teleoperation.yam_yam_bilateral_agent.YamYamBilateralAgent
