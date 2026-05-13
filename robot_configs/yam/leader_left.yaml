@@ -25,10 +25,10 @@ temp_record_flag: true
 # the wrong angle).  We correct that empirically with offset+slope on J4;
 # the other joints only need a scale.
 #
-# J4 calibration: re-run with ``scripts/diagnostics/zero_g_record_j4.py``
+# J4 calibration: re-run with ``scripts/diagnostics/tune_gravity_comp.py``
 # whenever the handle hardware or its mass changes.  The values below were
 # captured with these args:
-#   uv run scripts/diagnostics/zero_g_record_j4.py \
+#   uv run scripts/diagnostics/tune_gravity_comp.py \
 #       --xml-path assets/yam/yam_leaderhandle_autel.xml \
 #       --joint-indices 3 \
 #       --alphas 1.17 --betas 0.08 --slopes 0.35 --dampings 0.20

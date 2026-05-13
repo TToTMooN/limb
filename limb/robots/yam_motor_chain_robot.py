@@ -30,7 +30,7 @@ class YamMotorChainRobot(MotorChainRobot):
       Used when the URDF gravity *shape* (not just amplitude) doesn't
       match reality on a particular joint (e.g. a wrist roll whose link
       COM is offset from the URDF baseline).  See
-      ``scripts/diagnostics/zero_g_record_j4.py`` for how these values
+      ``scripts/diagnostics/tune_gravity_comp.py`` for how these values
       are calibrated.  Default is no-op (all zeros).
     * ``gravity_comp_per_joint_damping`` — optional per-joint viscous
       damping ``-kd_i * qdot_i`` injected into the gravity-comp torque.

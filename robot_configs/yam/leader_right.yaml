@@ -15,7 +15,7 @@ temp_record_flag: true
 #
 # NOTE: these values were calibrated on the LEFT leader (can_leader_l).
 # The right leader is mechanically identical but may have small per-arm
-# differences; re-run scripts/diagnostics/zero_g_record_j4.py against
+# differences; re-run scripts/diagnostics/tune_gravity_comp.py against
 # --channel can_leader_r to verify, and override here if needed.
 xml_path: "assets/yam/yam_leaderhandle_autel.xml"
 gravity_comp_factor: 1.0

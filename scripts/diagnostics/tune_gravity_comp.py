@@ -14,21 +14,21 @@ an empty list (the default) for any knob you don't want to override.
 
 Usage:
     # Hold-test current calibration on J4 with leader_left baseline.
-    uv run scripts/diagnostics/zero_g_record_j4.py
+    uv run scripts/diagnostics/tune_gravity_comp.py
 
     # Re-tune J4 with new constants.
-    uv run scripts/diagnostics/zero_g_record_j4.py \\
+    uv run scripts/diagnostics/tune_gravity_comp.py \\
         --joint-indices 3 --alphas 1.20 --betas 0.10 --slopes 0.40 --dampings 0.20
 
     # Tune J3 from scratch (scale only).
-    uv run scripts/diagnostics/zero_g_record_j4.py --joint-indices 2 --alphas 1.10
+    uv run scripts/diagnostics/tune_gravity_comp.py --joint-indices 2 --alphas 1.10
 
     # Tune J3 and J4 simultaneously — both alpha, J4 also gets new beta.
-    uv run scripts/diagnostics/zero_g_record_j4.py \\
+    uv run scripts/diagnostics/tune_gravity_comp.py \\
         --joint-indices 2 3 --alphas 1.10 1.20 --betas 0.0 0.10
 
     # Switch arm.
-    uv run scripts/diagnostics/zero_g_record_j4.py --channel can_leader_r
+    uv run scripts/diagnostics/tune_gravity_comp.py --channel can_leader_r
 
 CAN must already be up (`bash limb/scripts/reset_all_can.sh`).
 """
