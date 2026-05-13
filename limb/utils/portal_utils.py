@@ -228,6 +228,18 @@ def launch_remote_server(
 
     def _launch() -> None:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        # Inherit the parent's LIMB_LOG_SESSION so this subprocess writes its
+        # log file into the same session bucket; the per-PID suffix keeps
+        # writers from racing on a shared sink.  Also installs the threading
+        # excepthook so the i2rt server thread's joint-limit RuntimeError
+        # lands in the log file instead of bare subprocess stderr.
+        #
+        # stderr=False: subprocess loguru writes share fd 2 with the terminal
+        # and would clobber the parent's Rich Live TUI (e.g. i2rt logging
+        # "Entering zero_torque_mode" from inside the robot subprocess).
+        # Logs still hit the per-PID file sink — tail that to debug.
+        from limb.utils.launch_utils import setup_logging
+        setup_logging(stderr=False)
         obj = instantiate(cfg)
         assert port is not None
         remote_server = RemoteServer(obj, port, host, custom_remote_methods=custom_remote_methods)

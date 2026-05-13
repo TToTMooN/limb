@@ -11,6 +11,30 @@ motor_chain:
 # Log motor temperatures so we can debug thermal-cutoff drops (visible in obs as temp_rotor).
 temp_record_flag: true
 # Leader runs in zero_torque_mode + gravity comp.  See leader_left.yaml
-# for full notes on per-joint scaling.
+# for full notes on per-joint scale/offset/slope and the J4 calibration.
+#
+# NOTE: these values were calibrated on the LEFT leader (can_leader_l).
+# The right leader is mechanically identical but may have small per-arm
+# differences; re-run scripts/diagnostics/zero_g_record_j4.py against
+# --channel can_leader_r to verify, and override here if needed.
+xml_path: "assets/yam/yam_leaderhandle_autel.xml"
 gravity_comp_factor: 1.0
-gravity_comp_per_joint_scale: [1.0, 1.0, 1.2, 1.35, 1.0, 1.0, 1.0]
+gravity_comp_per_joint_scale:   [1.08, 1.08, 1.10, 1.17, 1.08, 1.08, 1.0]
+gravity_comp_per_joint_offset:  [0.0,  0.0,  0.0,  0.08, 0.0,  0.0,  0.0]
+gravity_comp_per_joint_slope:   [0.0,  0.0,  0.05, 0.35, 0.0,  0.0,  0.0]
+# Viscous damping on J4 — see leader_left.yaml for tuning rationale.
+gravity_comp_per_joint_damping: [0.0,  0.0,  0.0,  0.20, 0.0,  0.0,  0.0]
+# Disable i2rt's GripperForceLimiter on the leader; see leader_left.yaml
+# for rationale (limiter caches stale kp and is unused on a back-driven
+# gripper). Negative disables (motor_chain_robot.py:304).
+limit_gripper_force: -1
+# Widened soft limits for leader use (grav-comp only). See leader_left.yaml
+# for the rationale and verification procedure. i2rt adds a 0.1 rad buffer
+# on top of these (motor_chain_robot.py:206).
+joint_limits:
+  - [-2.4, 3.14]   # J1
+  - [-0.10, 3.44]   # J2
+  - [-0.05, 3.14]   # J3
+  - [-1.6, 1.6]   # J4 — widened from follower's ±1.35 (mechanical ~±1.63)
+  - [-1.50, 1.50]   # J5
+  - [-2.00, 2.00]   # J6

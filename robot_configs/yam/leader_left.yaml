@@ -13,12 +13,59 @@ motor_chain:
   motor_chain_name: "yam_leader_left"
 # Log motor temperatures so we can debug thermal-cutoff drops (visible in obs as temp_rotor).
 temp_record_flag: true
-# Leader runs in zero_torque_mode + gravity comp.  Global factor is the
-# baseline applied to every joint.  Per-joint scale multiplies on top of
-# that, so the effective comp on joint i is:
-#     g[i] * gravity_comp_per_joint_scale[i] * gravity_comp_factor
-# Joint 4 sags under its own weight, so we boost it specifically rather
-# than lifting the global factor (which would heat up motors 1-3 too).
+# Leader runs in zero_torque_mode + gravity comp.  Effective per-joint
+# comp torque is:
+#     g[i] = scale[i] * tau_model(q)[i] + offset[i] + slope[i] * q[i]
+# then multiplied by the global ``gravity_comp_factor``.
+#
+# We use a leader-specific MuJoCo XML that models the Autel handle's mass
+# on link_6 (left.yaml's yam.xml has no EE payload modeled).  Even with
+# that mass added, the URDF's link_6 COM is inherited from the teaching-
+# handle reference, so J4 has a residual *shape* error (gravity peaks at
+# the wrong angle).  We correct that empirically with offset+slope on J4;
+# the other joints only need a scale.
+#
+# J4 calibration: re-run with ``scripts/diagnostics/zero_g_record_j4.py``
+# whenever the handle hardware or its mass changes.  The values below were
+# captured with these args:
+#   uv run scripts/diagnostics/zero_g_record_j4.py \
+#       --xml-path assets/yam/yam_leaderhandle_autel.xml \
+#       --joint-indices 3 \
+#       --alphas 1.17 --betas 0.08 --slopes 0.35 --dampings 0.20
+# Untargeted joints kept the script's BASELINE_* values (scale=1.08, no
+# offset/slope/damping), which are reproduced verbatim below.
+#
 # Order: [j1, j2, j3, j4, j5, j6, gripper].  Gripper slot is ignored (g=0).
+xml_path: "assets/yam/yam_leaderhandle_autel.xml"
 gravity_comp_factor: 1.0
-gravity_comp_per_joint_scale: [1.0, 1.0, 1.2, 1.35, 1.0, 1.0, 1.0]
+gravity_comp_per_joint_scale:   [1.08, 1.08, 1.10, 1.17, 1.08, 1.08, 1.0]
+gravity_comp_per_joint_offset:  [0.0,  0.0,  0.0,  0.08, 0.0,  0.0,  0.0]
+gravity_comp_per_joint_slope:   [0.0,  0.0,  0.05, 0.35, 0.0,  0.0,  0.0]
+# Viscous damping on J4 only — absorbs residual gravity-model error so the
+# joint stops drifting at extreme angles.  Applied through the comp path
+# (-kd_i * qdot_i), so it composes with zero_torque_mode without restoring
+# position tracking.
+gravity_comp_per_joint_damping: [0.0,  0.0,  0.0,  0.20, 0.0,  0.0,  0.0]
+# Disable i2rt's GripperForceLimiter on leaders.  The limiter is meant for
+# followers that close on objects; the leader's gripper is back-driven by
+# the operator (and, during CORRECTING, held by a low-kp PD spring).  The
+# limiter caches kp at init (=2.0 from left.yaml) and would use that stale
+# value when computing corrections, even after ``gripper_spring_mode``
+# overrides motor kp.  Negative or zero disables (motor_chain_robot.py:304).
+limit_gripper_force: -1
+# Leader-specific joint limits, widened to roughly match the mechanical
+# range of the arm. The follower's tighter operating limits in left.yaml
+# are appropriate for position-controlled use; the leader runs zero-torque
+# + grav-comp so soft limits only need to (a) catch encoder faults and
+# (b) not crash on startup when the arm rests past the follower's range.
+# i2rt adds a 0.1 rad buffer to these at runtime (motor_chain_robot.py:206),
+# so effective limits are (lo - 0.1, hi + 0.1). Verify per-arm with
+# scripts/diagnostics/print_YAM_joints.py and tighten if any joint reads
+# materially narrower than these values.
+joint_limits:
+  - [-2.4, 3.14]   # J1
+  - [-0.10, 3.44]   # J2
+  - [-0.05, 3.14]   # J3
+  - [-1.6, 1.6]   # J4 — widened from follower's ±1.35 (mechanical ~±1.63)
+  - [-1.50, 1.50]   # J5
+  - [-2.00, 2.00]   # J6

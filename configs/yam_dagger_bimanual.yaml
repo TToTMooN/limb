@@ -38,6 +38,29 @@ agent:
   follower_keys: [left, right]
   leader_keys:   [leader_left, leader_right]
 
+  # PD spring on the leader gripper during CORRECTING.  Operator squeezes
+  # the trigger; gripper auto-returns to `gripper_spring_target_rad` on
+  # release.  Gripper-only — arm joints stay zero-torque (or compliant,
+  # per `correcting_kd_scale`).  All bounds in raw motor rad (same units
+  # as the leader's `gripper_limits`).  `target_rad` is the spring rest
+  # (open side); `lower_rad` is the closed-side bound of the operator's
+  # effective trigger throw; `open_rad` is the leader's mechanical open
+  # (= `gripper_limits[1]`).  Together they rescale the leader's effective
+  # range [lower_rad, target_rad] onto the follower's full [0, 1] command
+  # space.  Set `gripper_spring_target_rad: null` to disable.
+  #
+  # Values mirror configs/yam_dagger_spring_test.yaml (the tuning ground
+  # truth — keep these in sync if you re-tune there).
+  gripper_spring_target_rad: -2.8
+  gripper_spring_lower_rad: -0.42
+  gripper_spring_open_rad: -5.2
+  gripper_spring_kp: 0.15
+  gripper_spring_kd: 0.03
+  # Constant Nm on the gripper motor to overcome static friction; negative
+  # = toward open.  See gripper_spring_torque_bias docstring in
+  # limb/agents/dagger/dagger_agent.py for the sign convention + tuning.
+  gripper_spring_torque_bias: -0.05
+
   inner_policy:
     # TODO: replace with the policy you actually want to roll out.  This
     # skeleton points at the same shape the existing yam_policy_bimanual

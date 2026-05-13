@@ -1,0 +1,85 @@
+# DAgger gripper-spring smoke test — no policy required.
+#
+# Boots the full DAgger stack (4 YAMs + foot pedal) but starts in PAUSED
+# and stubs `inner_policy` with a copy of `inner_teleop`.  Because PAUSED
+# only transitions to CORRECTING via the correction pedal — never to
+# AUTONOMOUS unless the operator presses the pause_resume pedal — the
+# policy slot is never invoked.  This lets you bring up the leader
+# gripper spring without standing up a policy server.
+#
+# Pedal flow:
+#   boot          -> PAUSED       (leaders stiffen to position_mode)
+#   right pedal   -> CORRECTING   (leader arms zero-torque; gripper springs to target)
+#   right pedal   -> PAUSED       (leaders stiffen again; spring cleared)
+#   DON'T press left pedal — that would attempt to enter AUTONOMOUS.
+#
+# Launch:
+#   uv run limb teleop --config-path configs/yam_dagger_spring_test.yaml
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 100.0
+
+robots:
+  left:          ["robot_configs/yam/left.yaml"]
+  right:         ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+  leader_left:   ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_left.yaml"]
+  leader_right:  ["robot_configs/yam/left.yaml", "robot_configs/yam/leader_right.yaml"]
+
+release_at_startup:
+  - leader_left
+  - leader_right
+
+agent:
+  _target_: limb.agents.dagger.DAggerAgent
+  follower_keys: [left, right]
+  leader_keys:   [leader_left, leader_right]
+  initial_phase: paused   # skip AUTONOMOUS; pedal goes straight to CORRECTING
+
+  # Leader gripper PD spring during CORRECTING.  All bounds in raw motor
+  # rad (same units as `gripper_limits` in the leader's robot YAML).
+  # `target_rad` is the spring rest (open side); `lower_rad` is the
+  # closed-side bound of the operator's effective trigger throw;
+  # `open_rad` is the leader's mechanical open (= gripper_limits[1]) used
+  # to rescale [lower_rad, target_rad] -> follower's [0, 1] command space.
+  gripper_spring_target_rad: -2.8
+  gripper_spring_lower_rad: -0.42
+  gripper_spring_open_rad: -5.2
+  gripper_spring_kp: 0.15
+  gripper_spring_kd: 0.03
+  # Small constant Nm on the gripper motor to overcome static friction so the
+  # spring reliably returns to target instead of stalling.  Negative = toward
+  # open (matches gripper_limits sign in left.yaml).  Tune by feel: too small
+  # = still stalls partway; too large = snaps open against operator squeeze.
+  gripper_spring_torque_bias: -0.05
+
+  # Stub: same agent as inner_teleop, but never invoked because we never
+  # enter AUTONOMOUS.  Satisfies DAggerAgent's `inner_policy is not None`
+  # check without requiring a policy server.
+  inner_policy:
+    _target_: limb.agents.teleoperation.yam_yam_bilateral_agent.YamYamBilateralAgent
+    follower_keys: [left, right]
+    leader_keys:   [leader_left, leader_right]
+    joint_signs:   [1, 1, 1, 1, 1, 1]
+    gripper_passthrough: true
+
+  inner_teleop:
+    _target_: limb.agents.teleoperation.yam_yam_bilateral_agent.YamYamBilateralAgent
+    follower_keys: [left, right]
+    leader_keys:   [leader_left, leader_right]
+    joint_signs:   [1, 1, 1, 1, 1, 1]
+    gripper_passthrough: true
+
+  phase_trigger:
+    _target_: limb.agents.dagger.FootPedalPhaseTrigger
+    device_path: "auto"
+    vendor_id:  0x3553
+    product_id: 0xb001
+    pause_resume_key: "KEY_A"
+    correction_key:   "KEY_B"
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]

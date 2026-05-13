@@ -188,6 +188,12 @@ class LaunchConfig:
     # operator-backdriven leader arms in a bilateral / DAgger setup.  These
     # robots are also excluded from the "return to startup pose" shutdown step.
     release_at_startup: List[str] = field(default_factory=list)
+    # When > 0, released robots enter damped_compliant_mode(release_kd_scale)
+    # instead of zero_torque_mode -- gravity comp still active, but kd is
+    # restored to a fraction of the YAML-configured value to suppress ringing
+    # while the operator backdrives.  Typical range: 0.05 - 0.20.  Mirrors
+    # DAggerAgent.correcting_kd_scale for the bilateral release path.
+    release_kd_scale: float = 0.0
 
 
 @dataclass
@@ -473,8 +479,15 @@ def main(args: Args) -> None:
                 logger.warning(f"release_at_startup: '{name}' is not in robots {list(robots.keys())}, skipping")
                 continue
             try:
-                logger.info(f"Releasing '{name}' (zero_torque_mode) per release_at_startup")
-                robots[name].zero_torque_mode()
+                if main_config.release_kd_scale > 0.0:
+                    logger.info(
+                        f"Releasing '{name}' (damped_compliant_mode, kd_scale={main_config.release_kd_scale:.3f}) "
+                        f"per release_at_startup"
+                    )
+                    robots[name].damped_compliant_mode(main_config.release_kd_scale)
+                else:
+                    logger.info(f"Releasing '{name}' (zero_torque_mode) per release_at_startup")
+                    robots[name].zero_torque_mode()
             except Exception as e:
                 logger.warning(f"Could not release '{name}': {e}")
 
