@@ -29,6 +29,6 @@ joint_limits:
   - [-1.35, 1.35]
   - [-1.50, 1.50]
   - [-2.00, 2.00]
-gripper_limits: [0.0, -5.2]
+gripper_limits: [1.14, 6.40] # single arm: [1.14, 6.40]; bimanual: [0, -5.2]
 limit_gripper_force: 10.0
 # gripper_type: "yam_small"

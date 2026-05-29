@@ -41,12 +41,12 @@ sensors:
         _target_: limb.sensors.cameras.camera.CameraNode
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
-            serial_number: "409122274017"
+            serial_number: "409122274543"
     right_wrist_camera:
         _target_: limb.sensors.cameras.camera.CameraNode
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
-            serial_number: "409122274543"
+            serial_number: "409122274017"
 
 robots:
   # Two follower arms (commanded by the policy / bilateral teleop)
@@ -66,6 +66,14 @@ agent:
   _target_: limb.agents.dagger.DAggerAgent
   follower_keys: [left, right]
   leader_keys:   [leader_left, leader_right]
+
+  # Boot in PAUSED so the policy doesn't immediately drive the followers
+  # the instant the stack launches.  Operator stages the scene, presses
+  # SPACE (session START_STOP) to begin recording, then the LEFT pedal
+  # to release into AUTONOMOUS and let the policy take over.
+  # To reposition the followers before recording, press the RIGHT pedal
+  # (PAUSED -> CORRECTING) and back-drive via the leaders.
+  initial_phase: paused
 
   # Linear blend ramp on PAUSED -> AUTONOMOUS. Smooths the first 0.5s of
   # commanded actions from wherever the operator left the followers to the

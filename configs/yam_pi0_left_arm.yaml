@@ -1,11 +1,11 @@
-# OpenPI policy server config (for pi0, pi0.5, pi0-FAST served via openpi/scripts/serve_policy.py).
+# OpenPI policy server client for a SINGLE-ARM (left-arm-only) pi0.5 finetune
+# (served via openpi/scripts/serve_policy.py with config pi05_yam_single_arm).
 # Default targets a local server at 8111. Change `host` if remote.
 #
-# 3-camera setup. Comment out cameras you don't have.
+# Single left arm + head_camera + left_wrist_camera (no right wrist).
 
 _target_: limb.envs.launch.LaunchConfig
 # Match the dataset fps the policy was trained on (YAM datasets are 30 fps).
-# The teleop default of 100 Hz would replay actions ~3.3× too fast.
 hz: 60.0
 
 sensors:
@@ -20,15 +20,9 @@ sensors:
         camera:
             _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
             serial_number: "409122274543"
-    right_wrist_camera:
-        _target_: limb.sensors.cameras.camera.CameraNode
-        camera:
-            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
-            serial_number: "409122274017"
 
 robots:
   left: ["robot_configs/yam/left.yaml"]
-  right: ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
 
 agent:
   _target_: limb.agents.policy_learning.policy_agent.YamPolicyAgent
@@ -38,22 +32,20 @@ agent:
     port: 8111
   obs_transform:
     _target_: limb.agents.policy_learning.transforms.OpenPIObsTransform
+    # 7-D state: 6 left-arm joints + 1 left gripper.
     state_keys:
       - "left-joint_pos"
       - "left-gripper_pos"
-      - "right-joint_pos"
-      - "right-gripper_pos"
-    # Map server-side aloha-policy camera names to limb obs keys.
-    # AlohaInputs (used by all aloha-style pi0/pi0.5 finetunes) expects cam_high / cam_left_wrist / cam_right_wrist.
+    # AlohaInputs expects cam_high / cam_left_wrist; the server fills the missing
+    # cam_right_wrist with a black image (image_mask=False) automatically.
     image_keys:
       cam_high: "head_camera-images-rgb"
       cam_left_wrist: "left_wrist_camera-images-rgb"
-      cam_right_wrist: "right_wrist_camera-images-rgb"
     image_size: [224, 224]
-    prompt: "place the cubes into the box"   # required for VLAs
+    prompt: "Grasp the vial, and insert it into the stand."   # required for VLAs
   action_transform:
     _target_: limb.agents.policy_learning.transforms.ActionTransform
-    arm_names: ["left", "right"]
+    arm_names: ["left"]
     joints_per_arm: 7
     include_vel: false
     # YAM gripper position spans [0, 2.4] (see meta/stats.json action.min/max).
@@ -62,18 +54,5 @@ agent:
   smoothing_window: 4
   async_inference: false
 
-# recording:
-#   _target_: limb.recording.episode_recorder.EpisodeRecorder
-#   base_dir: "recordings"
-#   recording_fps: 30
-#   auto_start: true
-#   ee_frame_names:
-#     left: "ee_link"
-#     right: "ee_link"
-
 station_metadata:
   world_frame: "left_arm"
-  extrinsics:
-    right_arm_extrinsic:
-      position: [0.0, -0.61, 0.0]
-      rotation: [1.0, 0.0, 0.0, 0.0]

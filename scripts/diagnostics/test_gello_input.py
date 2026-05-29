@@ -12,14 +12,14 @@ Usage:
   uv run scripts/test_gello_input.py
 
   # Raw positions via network (R1 Lite Teleop over Ethernet):
-  uv run scripts/test_gello_input.py --host 10.42.0.1
+  uv run scripts/diagnostics/test_gello_input.py --host 10.42.0.1
 
   # Single arm, custom port:
-  uv run scripts/test_gello_input.py --port /dev/r1litet_usb --single-arm
+  uv run scripts/diagnostics/test_gello_input.py --port /dev/r1litet_usb --single-arm
 
   # Full agent loop with fake follower robot (no real YAM):
-  uv run scripts/test_gello_input.py --with-agent
-  uv run scripts/test_gello_input.py --with-agent --host 10.42.0.1
+  uv run scripts/diagnostics/test_gello_input.py --with-agent
+  uv run scripts/diagnostics/test_gello_input.py --with-agent --host 10.42.0.1
 
 Prerequisites:
   - Direct USB: R1 Lite Teleop connected via USB + dynamixel-sdk

@@ -2,9 +2,10 @@
 # Launch the GELLO position server on the R1 Lite Teleop onboard computer.
 #
 # Usage:
-#   bash scripts/start_gello_server.sh            # default host
-#   bash scripts/start_gello_server.sh 10.42.0.2  # custom host
-#   bash scripts/start_gello_server.sh --kill      # just kill, don't restart
+#   bash scripts/start_gello_server.sh                              # default host
+#   bash scripts/start_gello_server.sh 10.42.0.2                    # custom host
+#   bash scripts/start_gello_server.sh --kill                       # just kill, don't restart
+#   bash scripts/start_gello_server.sh -- --motor-ids 1 2 3 4 5 6   # forward args to server
 #
 # What it does:
 #   1. Kills any existing gello_position_server.py on the remote
@@ -22,8 +23,14 @@ SCREEN_NAME="gello_server"
 
 KILL_ONLY=false
 REMOTE_HOST="10.42.0.1"
+EXTRA_ARGS=()
+forward=false
 for arg in "$@"; do
-    if [[ "$arg" == "--kill" ]]; then
+    if $forward; then
+        EXTRA_ARGS+=("$arg")
+    elif [[ "$arg" == "--" ]]; then
+        forward=true
+    elif [[ "$arg" == "--kill" ]]; then
         KILL_ONLY=true
     else
         REMOTE_HOST="$arg"
@@ -77,7 +84,11 @@ echo "  Copied."
 
 # 3. Start in detached screen
 echo "[3/3] Starting server in screen session '${SCREEN_NAME}' ..."
-$SSH "screen -dmS ${SCREEN_NAME} python3 ~/${REMOTE_SCRIPT}"
+EXTRA_QUOTED=""
+for a in "${EXTRA_ARGS[@]}"; do
+    EXTRA_QUOTED+=" $(printf '%q' "$a")"
+done
+$SSH "screen -dmS ${SCREEN_NAME} python3 ~/${REMOTE_SCRIPT}${EXTRA_QUOTED}"
 sleep 1
 
 # Verify it's running

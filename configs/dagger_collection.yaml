@@ -1,31 +1,55 @@
 # DAgger continuous (RECAP-style) data collection overlay.
 #
-# Combine with a DAgger teleop config; the recorder runs from the first tick
-# and writes one parquet column per frame with the current phase
-# (`autonomous` / `paused` / `correcting`).  Filtering to corrections-only
-# is a one-liner at training time (`df[df.phase == 'correcting']`), so
-# no policy success/failure trajectory ever gets thrown away at record
-# time.
+# Combine with a DAgger teleop config; the recorder writes one parquet
+# column per frame with the current phase (`autonomous` / `paused` /
+# `correcting`). Filtering to corrections-only is a one-liner at training
+# time (`df[df.phase == 'correcting']`), so no policy success/failure
+# trajectory ever gets thrown away at record time.
 #
 # Usage:
 #   uv run limb record \
-#     --config-path configs/yam_dagger_bimanual.yaml \
+#     --config-path configs/yam_dagger_pi0_bimanual.yaml \
 #                   configs/dagger_collection.yaml
 #
-# Episode lifecycle:
-#   recorder.start_episode is called immediately and rotates every
-#   `episode_duration_s` seconds (default 300 s).  Rotation is deferred
-#   while CORRECTING so each boundary lands on a clean autonomous frame.
-#   Each frame's phase is stamped via the DAggerAgent's recorder hook.
+# Episode lifecycle (with the trigger below):
+#   * Operator triggers START_STOP to begin each episode (scene must be
+#     staged first — recording does NOT auto-start).
+#   * During the episode, the DAgger foot pedals continue to drive the
+#     policy phase (left = pause/resume, right = correction).
+#   * To end an episode (keyboard):
+#       [S]     → save with SUCCESS marker
+#       SPACE   → save with FAILURE marker (policy didn't complete the task)
+#       [D]     → discard episode (delete from disk)
+#       [Q]     → quit the session
+#   * After saving, the recorder pauses (robot holds last commanded pose
+#     via the DAgger PAUSED phase if you want it dead-still). Reset the
+#     scene by hand, then SPACE again to start the next episode.
+#   * `episode_duration_s` is a safety cap: if an episode runs over without
+#     an operator label, it is saved as FAILURE and the session waits for
+#     the next SPACE.
 #
-# Sessions stop after `num_episodes` rotations, or on Ctrl+C.
+# Trigger is KEYBOARD-ONLY here, unlike configs/collection_pedal.yaml.
+# The iKKEGOL pedal (0x3553:0xb001) is owned exclusively by the DAgger
+# phase trigger inside DAggerAgent (pause/resume + correction). Adding a
+# FootPedalTrigger to the session would either grab the device first and
+# block the agent's phase trigger (OSError EBUSY at agent init, observed),
+# or fail second and stay inactive. Keyboard avoids the conflict entirely.
+# If you want pedal-driven session control, plug in a SECOND pedal with
+# different USB IDs and add `FootPedalTrigger` with those overrides below.
+#
+# Sessions stop after `num_episodes` saved episodes, or on Ctrl+C.
 
 collection:
   _target_: limb.recording.dagger_session.DAggerCollectionSession
-  num_episodes: 25
-  task_instruction: "intervention demonstrations"
-  # Optional: rotate to a new episode every N seconds (defaults to 300).
-  # episode_duration_s: 300.0
+  num_episodes: 10
+  task_instruction: "vial placement intervention demonstrations"
+  # Safety cap on episode length (seconds).  With a trigger configured this
+  # almost never fires — the operator is the primary lifecycle driver.
+  # Set it well above your typical episode length; on timeout the episode
+  # is saved as FAILURE and the session waits for the next START_STOP.
+  episode_duration_s: 200.0
+  trigger:
+    _target_: limb.recording.trigger.KeyboardTrigger
   recorder:
     _target_: limb.recording.episode_recorder.EpisodeRecorder
     base_dir: "recordings"
