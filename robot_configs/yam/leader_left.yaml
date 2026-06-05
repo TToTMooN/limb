@@ -53,6 +53,10 @@ gravity_comp_per_joint_damping: [0.0,  0.0,  0.0,  0.20, 0.0,  0.0,  0.0]
 # value when computing corrections, even after ``gripper_spring_mode``
 # overrides motor kp.  Negative or zero disables (motor_chain_robot.py:304).
 limit_gripper_force: -1
+# leader-left (can_leader_l) measured gripper range. Overrides left.yaml's
+# [1.14, 6.40] base — this leader homes opposite-polarity to follower-left,
+# but passthrough is normalized so each arm just needs its own true range.
+gripper_limits: [0.0, -5.2]
 # Leader-specific joint limits, widened to roughly match the mechanical
 # range of the arm. The follower's tighter operating limits in left.yaml
 # are appropriate for position-controlled use; the leader runs zero-torque

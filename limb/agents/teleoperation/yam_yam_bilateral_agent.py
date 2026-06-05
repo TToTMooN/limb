@@ -24,6 +24,8 @@ between leader and follower with no mapping required.
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Sequence
 
@@ -32,6 +34,13 @@ from dm_env.specs import Array
 from loguru import logger
 
 from limb.agents.agent import Agent
+
+# Set LIMB_GRIPPER_DEBUG=1 to append per-tick leader gripper readings and the
+# computed follower gripper commands to this file (throttled).  Lets us see
+# whether the leader gripper signal is changing and whether it reaches the
+# follower, independent of the TUI which can clobber subprocess stderr.
+_GRIPPER_DEBUG = bool(os.environ.get("LIMB_GRIPPER_DEBUG"))
+_GRIPPER_DEBUG_PATH = "/tmp/limb_gripper_debug.log"
 from limb.utils.portal_utils import remote
 
 # YAM joint limits (radians) -- mirrors robot_configs/yam/left.yaml.
@@ -105,6 +114,7 @@ class YamYamBilateralAgent(Agent):
         action: Dict[str, Dict[str, np.ndarray]] = {}
         lo = _YAM_JOINT_LIMITS[:, 0]
         hi = _YAM_JOINT_LIMITS[:, 1]
+        dbg_rows = []
 
         for fkey, lkey in zip(self.follower_keys, self.leader_keys, strict=True):
             leader_obs = obs.get(lkey)
@@ -119,12 +129,45 @@ class YamYamBilateralAgent(Agent):
 
             if self.gripper_passthrough and "gripper_pos" in leader_obs:
                 gripper = np.asarray(leader_obs["gripper_pos"], dtype=np.float64).reshape(-1)
+                grip_src = "leader"
             else:
                 gripper = np.array([self.default_gripper_value], dtype=np.float64)
+                grip_src = "default"
 
             action[fkey] = {"pos": np.concatenate([joints, gripper])}
 
+            if _GRIPPER_DEBUG:
+                lg = leader_obs.get("gripper_pos")
+                fobs = obs.get(fkey) or {}
+                fg = fobs.get("gripper_pos")
+                fmt = lambda v: None if v is None else round(float(np.asarray(v).reshape(-1)[0]), 4)
+                dbg_rows.append(
+                    f"{lkey}->{fkey} leader={fmt(lg)} cmd={round(float(gripper[0]),4)} "
+                    f"follower_actual={fmt(fg)} src={grip_src}"
+                )
+
+        if _GRIPPER_DEBUG and dbg_rows:
+            self._debug_write(dbg_rows)
+
         return action
+
+    def _debug_write(self, rows) -> None:
+        """Append one throttled (~2 Hz) line per act() with, for each pair:
+        leader gripper reading, the follower gripper command, and the
+        follower's *actual* gripper reading from obs.  If `cmd` tracks
+        `leader` but `follower_actual` does not track `cmd`, the break is on
+        the follower side (mode / force limiter / calibration), not the
+        passthrough.  Only active when LIMB_GRIPPER_DEBUG is set.
+        """
+        now = time.monotonic()
+        if now - getattr(self, "_dbg_last_t", 0.0) < 0.5:
+            return
+        self._dbg_last_t = now
+        try:
+            with open(_GRIPPER_DEBUG_PATH, "a") as f:
+                f.write(f"{now:.2f}  " + "  |  ".join(rows) + "\n")
+        except Exception as e:
+            logger.warning("gripper debug write failed: {}", e)
 
     @remote(serialization_needed=True)
     def action_spec(self) -> Dict[str, Dict[str, Array]]:

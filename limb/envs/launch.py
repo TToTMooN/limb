@@ -736,6 +736,45 @@ def _run_sim_control_loop(
                 robot.close()
 
 
+# A correctly-calibrated YAM gripper reports normalized gripper_pos in [0, 1]
+# (0 = closed, 1 = open). If a gripper motor re-zeros between sessions, the
+# arm's hardcoded gripper_limits stop matching the hardware and gripper_pos
+# drifts outside [0, 1] — which both freezes the gripper (commands get clamped
+# past the stop) AND silently writes mis-normalized values into recordings.
+# This guard surfaces that immediately instead of after a ruined dataset.
+_GRIPPER_NORM_LO = -0.1
+_GRIPPER_NORM_HI = 1.1
+_GRIPPER_WARN_THROTTLE_S = 10.0
+
+
+def _warn_on_stale_gripper_calibration(obs: Observation, last_warn: Dict[str, float]) -> None:
+    """Warn (throttled per arm) when an arm's gripper_pos leaves [0, 1].
+
+    Out-of-range normalized gripper readings are the unmistakable signature of
+    stale ``gripper_limits`` after a gripper motor re-zeroed. Catching it at
+    runtime turns a silent, dataset-corrupting failure into an obvious alert.
+    """
+    now = time.monotonic()
+    for name, arm in obs.arms.items():
+        gp = getattr(arm, "gripper_pos", None)
+        if gp is None:
+            continue
+        val = float(np.asarray(gp).reshape(-1)[0])
+        if _GRIPPER_NORM_LO <= val <= _GRIPPER_NORM_HI:
+            continue
+        if now - last_warn.get(name, 0.0) < _GRIPPER_WARN_THROTTLE_S:
+            continue
+        last_warn[name] = now
+        logger.warning(
+            "Arm '{}' gripper_pos={:.2f} is outside [0,1] — gripper_limits are likely STALE "
+            "(gripper motor re-zeroed). Re-measure with "
+            "`uv run scripts/diagnostics/test_gripper_range.py --channel <ch>` and update that arm's "
+            "gripper_limits BEFORE recording, or this session's gripper data will be inconsistent.",
+            name,
+            val,
+        )
+
+
 def _run_control_loop(
     env: RobotEnv,
     agent: Agent,
@@ -769,8 +808,15 @@ def _run_control_loop(
     # stages — agent RPC, recorder, monitor — show up in the breakdown.
     extra_timing: Dict[str, float] = {}
 
+    # Per-arm last-warn timestamps for the stale-gripper-calibration guard.
+    gripper_warn_last: Dict[str, float] = {}
+
     while not _shutdown_requested:
         t_iter_start = time.perf_counter()
+
+        # Loud alert if any gripper_pos has drifted outside [0,1] (stale
+        # gripper_limits after a motor re-zero) — protects recorded data.
+        _warn_on_stale_gripper_calibration(obs, gripper_warn_last)
 
         t0 = time.perf_counter()
         obs_dict = obs.to_dict()

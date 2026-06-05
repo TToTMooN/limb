@@ -50,7 +50,12 @@ agent:
       cam_left_wrist: "left_wrist_camera-images-rgb"
       cam_right_wrist: "right_wrist_camera-images-rgb"
     image_size: [224, 224]
-    prompt: "place the cubes into the box"   # required for VLAs
+    prompt: "place the vials into the stand"   # required for VLAs
+    # Required when serving a pistar / pi0.6 RECAP checkpoint (any of the
+    # pi06_yam_vial_30fps[_lora][_from_sft][_recap]_infer configs). The server's
+    # TokenizePrompt raises "Adv_ind is required." without it. Leave blank/null
+    # when serving a vanilla pi0 / pi0.5 checkpoint.
+    adv_ind: "positive"
   action_transform:
     _target_: limb.agents.policy_learning.transforms.ActionTransform
     arm_names: ["left", "right"]

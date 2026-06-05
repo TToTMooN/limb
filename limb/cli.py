@@ -146,6 +146,13 @@ class ConvertLerobotCommand:
     # Deprecated alias for --target-fps. Kept so old scripts using --fps
     # don't break; emits a warning and is treated as --target-fps when set.
     fps: Optional[int] = None
+    # PiStar / pi0.6 RECAP column emission. See limb/data/convert_lerobot.py
+    # and docs/recap_collection.md for the full semantics.
+    pistar: bool = False
+    pistar_demo: bool = False
+    # Whitelist of arms to include in state/action vectors (e.g. for DAgger
+    # data which records 4 arms, restrict to the followers).
+    include_arms: Optional[Tuple[str, ...]] = None
 
     def run(self) -> None:
         from limb.data.convert_lerobot import Args, main
@@ -162,6 +169,9 @@ class ConvertLerobotCommand:
                 success_only=self.success_only,
                 push_to_hub=self.push_to_hub,
                 fps=self.fps,
+                pistar=self.pistar,
+                pistar_demo=self.pistar_demo,
+                include_arms=self.include_arms,
             )
         )
 

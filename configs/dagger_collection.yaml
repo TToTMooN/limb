@@ -41,8 +41,8 @@
 
 collection:
   _target_: limb.recording.dagger_session.DAggerCollectionSession
-  num_episodes: 10
-  task_instruction: "vial placement intervention demonstrations"
+  num_episodes: 100
+  task_instruction: "Grasp the vitals and insert them in a stand"
   # Safety cap on episode length (seconds).  With a trigger configured this
   # almost never fires — the operator is the primary lifecycle driver.
   # Set it well above your typical episode length; on timeout the episode

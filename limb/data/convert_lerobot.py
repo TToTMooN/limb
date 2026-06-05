@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
-import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -47,7 +46,13 @@ from limb.data.episode_utils import (
     build_action_vector,
     build_state_names,
     build_state_vector,
+    compute_pistar_adv_ind,
+    compute_pistar_intervention,
+    compute_pistar_reward,
+    compute_pistar_reward_label,
+    compute_pistar_value_label,
     compute_stats,
+    episode_success,
     find_episodes,
     load_episode,
 )
@@ -85,16 +90,49 @@ class Args:
     # rate without touching the data. Kept for backwards compatibility with
     # existing scripts; if --target-fps is set, it takes precedence.
     fps: Optional[int] = None
+    # Emit the five pistar / pi0.6 RECAP columns per frame:
+    #   intervention, reward, reward_label, value_label, adv_ind.
+    # Formulas mirror ybpy/pistar's pistar_rlds_demo_processing.py. By default
+    # (DAgger rollout mode):
+    #   - intervention = (phase == "correcting"), with fallback to interventions.npy
+    #   - reward       = sparse 1.0 at terminal iff SUCCESS marker
+    #   - value_label  = success → linear ramp; failure → constant -1.0
+    #   - adv_ind      = "positive" on intervention=1, else "none"
+    pistar: bool = False
+    # Pistar demo mode (for the SFT bootstrap from gello/teleop, where the
+    # operator drives every frame and there is no DAgger phase machine):
+    #   - intervention forced to 1 for every frame
+    #   - episode treated as success regardless of marker (success → ramp)
+    #   - adv_ind forced to "positive" for every frame
+    # Exactly mirrors pistar_rlds_demo_processing.py for LIBERO demos.
+    pistar_demo: bool = False
+    # Whitelist of arms to include in state/action vectors. DAgger sessions
+    # record 4 arms (followers + leaders) but policy training only wants the
+    # followers. ``None`` → include every arm found in the first episode
+    # (preserves prior behavior for non-DAgger datasets).
+    include_arms: Optional[tuple] = None
 
 
 def _probe_video_codec(path: Path) -> str:
     """Detect the actual video codec of an mp4 file via ffprobe."""
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
-             "-show_entries", "stream=codec_name", "-of", "csv=p=0",
-             str(path)],
-            capture_output=True, text=True, timeout=5,
+            [
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "csv=p=0",
+                str(path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         codec = result.stdout.strip()
         if codec:
@@ -162,6 +200,13 @@ def main(args: Args) -> None:
 
     first_ep = load_episode(episodes[0])
     arm_names = sorted(first_ep["arms"].keys())
+    if args.include_arms:
+        wanted = list(args.include_arms)
+        missing = [a for a in wanted if a not in arm_names]
+        if missing:
+            raise SystemExit(f"--include-arms specified {missing}, not in episode (found {arm_names})")
+        arm_names = wanted
+        logger.info("Filtering to --include-arms: {}", arm_names)
     cam_names = [c["name"] for c in first_ep["cameras"]]
     task = args.task or first_ep["metadata"].get("task_instruction", "")
 
@@ -195,7 +240,8 @@ def main(args: Args) -> None:
         logger.warning(
             "--fps {} is deprecated; use --target-fps to make the resampling intent explicit. "
             "Treating as --target-fps {}.",
-            legacy_fps, legacy_fps,
+            legacy_fps,
+            legacy_fps,
         )
     elif target_fps_override is None:
         logger.info("No --target-fps: auto-detecting each episode's source fps; no resampling.")
@@ -235,10 +281,7 @@ def main(args: Args) -> None:
             logger.warning("Skipping {}: invalid timestamps (duration <= 0)", ep_path.name)
             return None
 
-        do_resample = (
-            target_fps_override is not None
-            and abs(target_fps_override - source_fps) / source_fps > 0.01
-        )
+        do_resample = target_fps_override is not None and abs(target_fps_override - source_fps) / source_fps > 0.01
         output_fps = float(target_fps_override) if target_fps_override is not None else source_fps
 
         # Optional DAgger phase metadata (None when episode lacks phase.npy).
@@ -249,10 +292,17 @@ def main(args: Args) -> None:
         if do_resample:
             logger.info(
                 "  Episode {}: resample {} steps @ {:.2f} Hz -> @ {:.2f} Hz",
-                ep_idx, n_steps, source_fps, output_fps,
+                ep_idx,
+                n_steps,
+                source_fps,
+                output_fps,
             )
             tgt_rel, states, actions = resample_state_action(
-                timestamps, states, actions, output_fps, zoh_action_dims=zoh_dims,
+                timestamps,
+                states,
+                actions,
+                output_fps,
+                zoh_action_dims=zoh_dims,
             )
             n_steps_out = len(tgt_rel)
             # ZOH-resample phase metadata onto the target grid. Phase labels
@@ -260,6 +310,7 @@ def main(args: Args) -> None:
             # we do for the gripper and video streams.
             if src_phase is not None or src_corr_idx is not None:
                 from limb.data.resample import _zoh_indices
+
                 src_rel = timestamps - timestamps[0]
                 zoh = _zoh_indices(src_rel, tgt_rel)
                 if src_phase is not None and len(src_phase) >= len(timestamps):
@@ -270,7 +321,9 @@ def main(args: Args) -> None:
             tgt_rel = None
             logger.info(
                 "  Episode {}: {} steps @ {:.2f} Hz (no resample{})",
-                ep_idx, n_steps, output_fps,
+                ep_idx,
+                n_steps,
+                output_fps,
                 ", labels-only update" if target_fps_override is None else "",
             )
             n_steps_out = n_steps
@@ -287,10 +340,7 @@ def main(args: Args) -> None:
         worker_codec: Optional[str] = None
         for cam in episode["cameras"]:
             src = cam["video_path"]
-            dst = (
-                output_dir / "videos" / f"observation.images.{cam['name']}"
-                / "chunk-000" / f"file-{ep_idx:03d}.mp4"
-            )
+            dst = output_dir / "videos" / f"observation.images.{cam['name']}" / "chunk-000" / f"file-{ep_idx:03d}.mp4"
             if do_resample:
                 resample_video(src, dst, timestamps, tgt_rel, output_fps)
             else:
@@ -307,8 +357,8 @@ def main(args: Args) -> None:
             "output_fps": output_fps,
             "video_size": worker_video_size,
             "codec": worker_codec,
-            "phase": src_phase,                  # may be None
-            "correction_index": src_corr_idx,    # may be None
+            "phase": src_phase,  # may be None
+            "correction_index": src_corr_idx,  # may be None
         }
 
     results_by_idx: Dict[int, Dict[str, Any]] = {}
@@ -320,8 +370,7 @@ def main(args: Args) -> None:
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as pool:
             future_to_idx = {
-                pool.submit(_heavy_episode, ep_idx, ep_path): ep_idx
-                for ep_idx, ep_path in enumerate(episodes)
+                pool.submit(_heavy_episode, ep_idx, ep_path): ep_idx for ep_idx, ep_path in enumerate(episodes)
             }
             for fut in concurrent.futures.as_completed(future_to_idx):
                 ep_idx = future_to_idx[fut]
@@ -362,6 +411,27 @@ def main(args: Args) -> None:
             ci = np.asarray(res["correction_index"])
             if len(ci) >= n_steps_out:
                 table_data["correction_index"] = pa.array(ci[:n_steps_out].astype(np.int32))
+
+        # PiStar / pi0.6 RECAP columns (matches pistar_rlds_demo_processing.py).
+        # Gated on --pistar so non-pistar datasets stay clean.
+        if args.pistar or args.pistar_demo:
+            if args.pistar_demo:
+                # SFT/demo bootstrap: every frame is operator-driven, every
+                # episode is a successful expert demonstration by convention.
+                success = True
+                interv = np.ones(n_steps_out, dtype=np.int64)
+            else:
+                success = episode_success(episodes[ep_idx])
+                interv = compute_pistar_intervention(res.get("phase"), res.get("interventions"), n_steps_out)
+            reward = compute_pistar_reward(n_steps_out, success)
+            reward_lbl = compute_pistar_reward_label(n_steps_out)
+            value_lbl = compute_pistar_value_label(n_steps_out, success)
+            adv_ind = compute_pistar_adv_ind(interv)
+            table_data["intervention"] = pa.array(interv, type=pa.int64())
+            table_data["reward"] = pa.array(reward, type=pa.float32())
+            table_data["reward_label"] = pa.array(reward_lbl, type=pa.float32())
+            table_data["value_label"] = pa.array(value_lbl, type=pa.float32())
+            table_data["adv_ind"] = pa.array(adv_ind, type=pa.string())
         table = pa.table(table_data)
         parquet_path = data_dir / f"file-{ep_idx:03d}.parquet"
         pq.write_table(table, str(parquet_path), compression="snappy")
@@ -451,7 +521,9 @@ def main(args: Args) -> None:
                 "Episodes have inconsistent output fps (range {:.2f}..{:.2f} Hz). "
                 "Writing info.json:fps = {:.2f} (modal) — consumer code that joins "
                 "across episodes may need to use the per-episode timestamp column.",
-                uniq_fps.min(), uniq_fps.max(), dataset_fps,
+                uniq_fps.min(),
+                uniq_fps.max(),
+                dataset_fps,
             )
     info_fps = round(dataset_fps) if abs(dataset_fps - round(dataset_fps)) < 1e-3 else dataset_fps
 
@@ -495,6 +567,16 @@ def main(args: Args) -> None:
         features["phase"] = {"dtype": "string", "shape": [1], "names": None, "fps": info_fps}
     if advertise_correction:
         features["correction_index"] = {"dtype": "int32", "shape": [1], "names": None, "fps": info_fps}
+    # PiStar / pi0.6 RECAP columns. Always written when --pistar or
+    # --pistar-demo is set, so advertise unconditionally on either flag.
+    # Names mirror pistar's own pistar_rlds_demo_processing.py so
+    # downstream consumers see the canonical schema.
+    if args.pistar or args.pistar_demo:
+        features["intervention"] = {"dtype": "int64", "shape": [1], "names": ["intervention_flag"], "fps": info_fps}
+        features["reward"] = {"dtype": "float32", "shape": [1], "names": ["reward"], "fps": info_fps}
+        features["reward_label"] = {"dtype": "float32", "shape": [1], "names": ["reward_label"], "fps": info_fps}
+        features["value_label"] = {"dtype": "float32", "shape": [1], "names": ["value_label"], "fps": info_fps}
+        features["adv_ind"] = {"dtype": "string", "shape": [1], "names": ["adv_ind"], "fps": info_fps}
 
     info = {
         "codebase_version": CODEBASE_VERSION,
@@ -556,12 +638,8 @@ def _write_dataset_card(
     state_dim = len(state_names)
     action_dim = len(action_names)
 
-    state_table = "\n".join(
-        f"| {i} | `{name}` |" for i, name in enumerate(state_names)
-    )
-    action_table = "\n".join(
-        f"| {i} | `{name}` |" for i, name in enumerate(action_names)
-    )
+    state_table = "\n".join(f"| {i} | `{name}` |" for i, name in enumerate(state_names))
+    action_table = "\n".join(f"| {i} | `{name}` |" for i, name in enumerate(action_names))
     cam_list = "\n".join(f"| `{c}` |" for c in cam_names)
 
     card = f"""---

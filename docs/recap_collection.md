@@ -4,71 +4,80 @@ Robot-side recipe for collecting **RECAP** rollout data with limb. The
 training side lives in openpi (`openpi/docs/recap_finetune.md`); this doc
 covers what limb has to record and convert.
 
-> **TL;DR.** We follow **RLinf's RECAP** (advantage as a CFG conditioning
-> token, fine-tuned on the OpenPI pi0.5 — see `recap_finetune.md`). RLinf's
-> algorithm is **value-based**: it needs the standard LeRobot columns plus a
-> **per-episode success/failure label**. It does *not* require Evo-RL's
-> per-frame `policy_action` / `is_intervention` / `collector_policy_id`
-> columns. The recording side already captures everything; the only converter
-> gap is **exposing `episode_success`**. See [§ What's left to do](#whats-left-to-do).
+> **TL;DR.** We follow **pistar** ([ybpy/pistar](https://github.com/ybpy/pistar))
+> — the **direct pi0.6/RECAP implementation** that the algorithm originates
+> from. pistar is a fork of openpi, conditions on advantage via a tokenized
+> `adv_ind ∈ {"positive","negative","none"}` consumed by openpi's standard
+> tokenizer transform, and ships a real-robot deployment toolkit
+> (`control_your_robot/`). For limb, the **recording side is already done**;
+> the converter needs to write **five pistar fields** per frame:
+> `intervention`, `reward`, `reward_label`, `value_label`, `adv_ind`. All
+> derivable from data already recorded — see
+> [§ What's left to do](#whats-left-to-do).
 
 > **What RECAP is** — *RL with Experience and Corrections via
-> Advantage-conditioned Policies*. Four offline stages: (1) compute
-> per-trajectory returns from success/failure labels, (2) train a value
-> model, (3) compute per-step advantages with N-step lookahead, (4) fine-tune
-> the policy, conditioning on advantage. Stages 1–4 are offline; limb owns
-> Stage 0 (data).
+> Advantage-conditioned Policies*. The offline RL algorithm in **pi0.6**.
+> Stages (offline): (1) merge demo + rollout data, (2) train a VLM value
+> model on per-step `value_label`, (3) run VLM inference to rewrite `adv_ind`
+> on rollout frames, (4) continue policy training with advantage-conditioned
+> tokens. Limb owns Stage 0 (data).
 >
 > **References:**
 >
-> - **Algorithm we use: [RLinf `examples/recap/`](https://github.com/RLinf/RLinf)**
+> - **Algorithm we use: [ybpy/pistar](https://github.com/ybpy/pistar)** — pi0.6
+>   itself. Fork of openpi (JAX). Conditioning is a tokenized `adv_ind`
+>   string (`"positive"`, `"negative"`, `"none"`) consumed in openpi's
+>   standard tokenizer (`src/openpi/transforms.py:276`). Real-robot
+>   deployment via `control_your_robot/`. Value model = SigLIP + Gemma3 +
+>   201-atom C51 head over [-1, 0].
+> - **Alternative: [RLinf `examples/recap/`](https://github.com/RLinf/RLinf)**
 >   ([docs](https://rlinf.readthedocs.io/en/latest/rst_source/examples/embodied/recap.html)).
->   Operates on the OpenPI policy model; advantage is a learned **conditioning
->   token** trained with classifier-free guidance. Validated in simulation
->   (LIBERO) only — its hyperparameters (`r_fail=-300`, `N=10`) are sim-tuned
->   and need real-robot recalibration.
-> - **Real-robot reference: [MINT-SJTU/Evo-RL](https://github.com/MINT-SJTU/Evo-RL).**
->   The only RECAP validated on real hardware (SO-101, AgileX PiPER). We
->   borrow its collection protocol (human-in-the-loop, `s`/`f` per-episode
->   labels) and real-robot intuition (penalty scaling), but **not** its
->   text-tag conditioning. Its `complementary_info.*` columns are optional
->   extras here, not requirements.
+>   Same value-model architecture and tokenized-advantage conditioning, but
+>   **PyTorch** and a *re-implementation* of pi0.6's RECAP. Labels advantage
+>   via Critic-Expert + N-step lookahead → top-30% quantile binarization,
+>   instead of pistar's VLM labeling. Sim-validated only (LIBERO). The
+>   vendored standalone `openpi/scripts/recap/compute_returns.py` belongs to
+>   this alternative; not used in the pistar path.
+> - **Reference: [MINT-SJTU/Evo-RL](https://github.com/MINT-SJTU/Evo-RL).**
+>   Real-robot RECAP but with a **different conditioning** (advantage tag
+>   injected into task text). Useful only for collection-protocol intuition
+>   (`s`/`f` per-episode labels, penalty scaling).
 
 ---
 
-## What RECAP needs from rollout data
+## What RECAP needs from rollout data (pistar schema)
 
-RLinf's value-based pipeline reads a standard LeRobot dataset plus per-episode
-success. The advantage is computed from the value model over observations —
-**not** from diffing a recorded `policy_action` against `action` — so the
-Evo-RL per-frame extras are optional.
+pistar requires five RECAP fields per frame, **on top of** the standard
+LeRobot columns. From `pistar_rlds_demo_processing.py` and the pistar README:
 
-| Column | Needed by RLinf? | limb status |
-|---|---|---|
-| `observation.state` (14-D) | ✅ required | ✅ recorded + converted |
-| `observation.images.*` | ✅ required | ✅ recorded + converted |
-| `action` (executed; operator's during CORRECTING) | ✅ required | ✅ recorded + converted |
-| `task` (language instruction) | ✅ required | ✅ recorded + converted |
-| **`episode_success`** (per-episode bool) | ✅ **required** (Stage 1 returns) | ✅ recorded as `SUCCESS`/`FAILURE` marker; ⚠️ **not yet exposed by converter** |
-| `phase` / `correction_index` | optional (analysis, weighting) | ✅ recorded + converted |
-| `policy_action` | optional (not used by RLinf) | ✅ recorded (`{arm}_policy_actions.npz`); not converted |
-| `is_intervention` | optional (verify advantages skew positive) | ✅ recorded (`interventions.npy`) |
-| `complementary_info.*` (Evo-RL names) | not used by RLinf | n/a |
+| Column | Dtype / shape | Meaning | Formula at convert time |
+|---|---|---|---|
+| `intervention` | int64 [1] | `1` if human-driven this frame, `0` if autonomous | `phase == "correcting"` |
+| `reward` | float32 [1] | sparse success signal | `1.0` at last frame iff episode SUCCESS, else `0.0` |
+| `reward_label` | float32 [1] | per-step reward used by VLM advantage | `-1/T` except `0.0` at terminal (same regardless of outcome) |
+| `value_label` | float32 [1] | training target for VLM value model | success → `-(T-1-t)/T` (linear ramp `≈-1 → 0`); failure → `-1.0` constant |
+| `adv_ind` | string [1] | tokenized advantage condition: `"positive"` / `"negative"` / `"none"` | initial: `"positive"` for `intervention==1`, `"none"` for `intervention==0`; **rewritten by VLM** for autonomous frames at training time |
 
-Returns are derived offline by Stage 1 from `episode_success`:
+Standard LeRobot columns also required (already produced by
+`limb convert-lerobot`):
 
-```
-r_t = -1                       for every step
-terminal = 0                   if episode_success else r_fail
-G_t = r_t + γ G_{t+1}          with γ = 1.0
-```
+| Column | limb status |
+|---|---|
+| `observation.state` (14-D YAM bimanual) | ✅ |
+| `observation.images.*` (head + 2 wrists) | ✅ |
+| `action` (executed; operator's during CORRECTING) | ✅ |
+| `task` / `task_index` | ✅ |
 
-limb records **no** rewards or returns — only the per-episode success label.
+Why this fits DAgger data cleanly: limb's CORRECTING phase **is** the
+"human-driven / demo-shaped" condition pistar wants for `intervention=1`,
+and AUTONOMOUS phase **is** the "rollout / VLM-relabeled" condition for
+`intervention=0`. No extra recording needed.
 
-> **Real-robot penalty.** RLinf's `r_fail = -300` assumes ~300-step LIBERO
-> episodes. YAM at 30 Hz / 60 s = 1800 steps, so per-step `-1` sums to `-1800`
-> on success and a `-300` failure terminal can't separate the classes. Scale
-> `r_fail` to ~5–10× max episode length. Tuned at Stage 1 in
+> **Real-robot intuition.** Both pistar (VLM N-step) and RLinf (Critic
+> Expert N-step) compute advantage via N-step lookahead. The sim-tuned
+> RLinf hyperparameters (`r_fail=-300`, `N=10`) don't apply — pistar uses
+> `value_label`/`reward_label` directly, and its VLM learns the right scale
+> from the data. Tune at training time in
 > `openpi/docs/recap_finetune.md`, not at collection.
 
 ---
@@ -76,124 +85,165 @@ limb records **no** rewards or returns — only the per-episode success label.
 ## What's already recorded (verify, don't rebuild)
 
 Written today by `limb record` with `configs/yam_dagger_pi0_bimanual.yaml` +
-`configs/dagger_collection.yaml`:
+`configs/dagger_collection.yaml`. All five pistar columns derive from this:
 
-| Raw file in `recordings/<session>/episode_NNNNNN/` | Maps to |
+| Raw file in `recordings/<session>/episode_NNNNNN/` | Used for pistar field(s) |
 |---|---|
-| `{arm}_actions.npz` (`pos`) | `action` (executed) |
+| `{arm}_actions.npz` (`pos`) | `action` (standard column) |
 | `{cam}.mp4` + `{cam}_timestamps.npy` | `observation.images.*` |
 | `{arm}_states.npz` | `observation.state` |
 | `metadata.json:task_instruction` | `task` |
-| `SUCCESS` / `FAILURE` marker | `episode_success` ← **the one that needs converter exposure** |
-| `phase.npy`, `interventions.npy`, `correction_index.npy` | optional metadata |
-| `{arm}_policy_actions.npz` | optional (`policy_action`; RLinf doesn't need it) |
+| `SUCCESS` / `FAILURE` marker | drives `reward` (sparse 1.0 at terminal iff success), `value_label` (ramp vs constant -1) |
+| `phase.npy` (`autonomous`/`paused`/`correcting`) | drives `intervention` (1 if "correcting", else 0) and initial `adv_ind` ("positive" if intervention else "none") |
+| `interventions.npy` | alternative source for `intervention` (`phase` preferred) |
+| `timestamps.npy` | drives `T` (episode length) for `reward_label`/`value_label` formulas |
+| `{arm}_policy_actions.npz` | not used by pistar; keep recorded for analysis |
 
 The success/failure marker is written by `DAggerCollectionSession`
-(`s` = SUCCESS, SPACE = FAILURE — see the keyboard trigger we added). Code
-anchors: success path in [dagger_session.py](../limb/recording/dagger_session.py);
+(`s` = SUCCESS, SPACE = FAILURE — keyboard trigger).
+Code anchors: success path in [dagger_session.py](../limb/recording/dagger_session.py);
 phase/policy streams in [episode_recorder.py:296-377](../limb/recording/episode_recorder.py#L296).
 
-**Smoke-test a recorded episode:**
+**Smoke-test a recorded episode** (must have `SUCCESS`-or-`FAILURE` and
+`phase.npy`):
 
 ```bash
 ls recordings/<session>/episode_000000/
 # expect: left_actions.npz right_actions.npz left_states.npz right_states.npz
-#         SUCCESS (or FAILURE)  metadata.json  *.mp4  *_timestamps.npy
-#         (+ optional: phase.npy interventions.npy *_policy_actions.npz)
+#         SUCCESS (or FAILURE)  phase.npy  interventions.npy
+#         metadata.json  *.mp4  *_timestamps.npy  timestamps.npy
 ```
 
 ---
 
 ## What's left to do
 
-The LeRobot converter (`limb/data/convert_lerobot.py`, `limb convert-lerobot`)
-already emits a v3.0 dataset with `observation.state`, `observation.images.*`,
-`action`, `task`, and the optional `phase` / `correction_index` columns. The
-**one required gap** for RLinf RECAP is exposing the success label.
+`limb convert-lerobot` already emits a v3.0 dataset with `observation.state`,
+`observation.images.*`, `action`, `task`, and the optional `phase` /
+`correction_index` columns. **Two files change** to emit the five pistar
+columns; the recorder/agent code is untouched.
 
-### Task 1 — `is_success` per-frame column (required)
+### Task 1 — helpers in `limb/data/episode_utils.py`
 
-**Pinned against the actual RLinf source** (vendored at
-`openpi/scripts/recap/compute_returns.py`). Stage 1 reads these columns from
-each **data parquet** (`data/chunk-*/file-*.parquet`):
-
-```python
-_READ_COLUMNS = ["episode_index", "frame_index", "is_success", "task_index", "task"]
-```
-
-and for each episode uses the **last frame's** value:
+Add five functions mirroring `pistar_rlds_demo_processing.py`'s formulas
+exactly:
 
 ```python
-is_success = bool(is_success_col[ep_end - 1])   # dataset_type="rollout"
+def episode_success(episode_dir: Path) -> bool:
+    return (episode_dir / "SUCCESS").exists()
+
+def compute_pistar_intervention(phase: np.ndarray | None,
+                                interventions: np.ndarray | None,
+                                n_steps: int) -> np.ndarray:
+    """1 if 'correcting' phase (operator-driven), else 0."""
+    if phase is not None and len(phase) >= n_steps:
+        return (np.asarray(phase[:n_steps]) == "correcting").astype(np.int64)
+    if interventions is not None and len(interventions) >= n_steps:
+        return np.asarray(interventions[:n_steps], dtype=np.int64)
+    return np.zeros(n_steps, dtype=np.int64)
+
+def compute_pistar_reward(n_steps: int, success: bool) -> np.ndarray:
+    """Sparse: 1.0 at last frame iff success."""
+    r = np.zeros(n_steps, dtype=np.float32)
+    if success and n_steps > 0:
+        r[-1] = 1.0
+    return r
+
+def compute_pistar_reward_label(n_steps: int) -> np.ndarray:
+    """-1/T per step, 0 at terminal. Same for success and failure."""
+    rl = np.full(n_steps, -1.0 / float(n_steps), dtype=np.float32)
+    if n_steps > 0:
+        rl[-1] = 0.0
+    return rl
+
+def compute_pistar_value_label(n_steps: int, success: bool) -> np.ndarray:
+    """Initial VLM training target.
+       Success: linear ramp -(T-1-t)/T  (≈-1 → 0).
+       Failure: constant -1.0 (the VLM refines from here)."""
+    if success:
+        t = np.arange(n_steps, dtype=np.float32)
+        return (-(n_steps - 1 - t) / float(n_steps)).astype(np.float32)
+    return np.full(n_steps, -1.0, dtype=np.float32)
+
+def compute_pistar_adv_ind(intervention: np.ndarray) -> list[str]:
+    """'positive' on intervention=1 (demo-shaped); 'none' on
+    intervention=0 (rewritten later by VLM)."""
+    return ["positive" if int(v) == 1 else "none" for v in intervention]
 ```
 
-For `dataset_type="rollout"` (RECAP rollouts) the `is_success` column is
-**required** — Stage 1 raises `ValueError` without it. So:
+### Task 2 — `--pistar` flag in `limb/data/convert_lerobot.py`
 
-1. Add a helper in `episode_utils.py`:
-   `episode_success(episode_dir) -> bool` — `(dir / "SUCCESS").exists()`;
-   `FAILURE` or missing → `False`.
-2. In `convert_lerobot.py`, write a **per-frame `is_success` bool column** into
-   each episode's data-parquet `table_data` (broadcast the episode's single
-   label to all its frames — simplest, and the last frame carries the value
-   Stage 1 actually reads). Put it next to `episode_index`/`frame_index` at
-   [convert_lerobot.py:346-354](../limb/data/convert_lerobot.py#L346):
-   ```python
-   "is_success": pa.array(np.full(n_steps_out, ep_success, dtype=bool)),
-   ```
-3. Advertise it in `info.json:features` (dtype `bool`, shape `[1]`), gated like
-   the existing `phase`/`correction_index` features so the dataset schema
-   stays consistent.
+Gate the five columns behind a flag so non-pistar datasets stay clean. In
+`Args`:
 
-Notes:
-- **Column name is `is_success`, not `episode_success`.** That's what RLinf
-  reads. (Evo-RL's per-episode `episode_success` is a different convention;
-  ignore it here.)
-- `task` resolution is already covered: Stage 1 falls back to
-  `task_index` → `meta/tasks.jsonl`, which `convert_v3_to_v21.py` produces.
-- For the SFT bootstrap dataset you can set `dataset_type: sft` in Stage 1's
-  config, which forces `is_success=True` and needs no column — but the DAgger
-  rollout dataset must carry `is_success`.
+```python
+pistar: bool = False
+```
 
-### Task 2 — optional metadata passthrough
+In the Phase-2 write loop (around
+[convert_lerobot.py:346-354](../limb/data/convert_lerobot.py#L346)),
+when `args.pistar` is set, derive and append the columns to `table_data`:
 
-Not required by RLinf, but cheap and useful for analysis/verification:
+```python
+if args.pistar:
+    success     = episode_success(episodes[ep_idx])
+    interv      = compute_pistar_intervention(res.get("phase"), None, n_steps_out)
+    reward      = compute_pistar_reward(n_steps_out, success)
+    reward_lbl  = compute_pistar_reward_label(n_steps_out)
+    value_lbl   = compute_pistar_value_label(n_steps_out, success)
+    adv_ind     = compute_pistar_adv_ind(interv)
+    table_data["intervention"] = pa.array(interv,     type=pa.int64())
+    table_data["reward"]       = pa.array(reward,     type=pa.float32())
+    table_data["reward_label"] = pa.array(reward_lbl, type=pa.float32())
+    table_data["value_label"]  = pa.array(value_lbl,  type=pa.float32())
+    table_data["adv_ind"]      = pa.array(adv_ind,    type=pa.string())
+```
 
-- **`policy_action`** — the converter already *loads* `policy_actions` but
-  drops it. If you want it for offline analysis, add a
-  `build_policy_action_vector()` and a write block mirroring the `phase`
-  handling at [convert_lerobot.py:357-364](../limb/data/convert_lerobot.py#L357).
-  **Resample it like `action`** (continuous, ZOH only the gripper dims), not
-  like the discrete `phase`. Skip for v1 — RLinf doesn't use it.
-- **`is_intervention`** — derive from `phase == "correcting"`. Handy for
-  confirming, at Stage 3, that advantages skew positive on intervention
-  frames.
+And advertise in `info.json:features` (matching pistar's exact `names`):
 
-### No `--recap` converter / no Evo-RL naming
+```python
+if args.pistar:
+    features["intervention"] = {"dtype":"int64",  "shape":[1],
+                                "names":["intervention_flag"], "fps": info_fps}
+    features["reward"]       = {"dtype":"float32","shape":[1],
+                                "names":["reward"],       "fps": info_fps}
+    features["reward_label"] = {"dtype":"float32","shape":[1],
+                                "names":["reward_label"], "fps": info_fps}
+    features["value_label"]  = {"dtype":"float32","shape":[1],
+                                "names":["value_label"],  "fps": info_fps}
+    features["adv_ind"]      = {"dtype":"string", "shape":[1],
+                                "names":["adv_ind"],      "fps": info_fps}
+```
 
-Since RLinf reads a standard LeRobot dataset + `episode_success`, there's no
-need for a separate `convert-recap` script or Evo-RL's `complementary_info.*`
-column names. `limb convert-lerobot` (plus Task 1) is the converter. Drop the
-earlier plan to mirror Evo-RL's schema — that was for the text-tag path we
-abandoned.
+### Files NOT modified
+
+- `limb/recording/episode_recorder.py` — already writes everything needed.
+- `limb/recording/dagger_session.py` — already writes `SUCCESS`/`FAILURE`.
+- `limb/agents/dagger/dagger_agent.py` — `policy_pos` is recorded but not
+  needed by pistar; leave it.
+
+### Optional column passthrough
+
+- **`policy_action`** — not used by pistar. Keep recorded for offline
+  analysis; skip the converter passthrough for v1.
+- **`phase` / `correction_index`** — already emitted by the existing
+  converter; leave on for debug/visualization. Not required by pistar.
 
 ---
 
 ## Format / version — verify
 
-- limb emits LeRobot **v3.0**. openpi's lerobot 0.1.0 (and RLinf's loaders)
-  read **v2.1**, so run `openpi/scripts/convert_v3_to_v21.py` before training.
-  Because `is_success` is a **per-frame data-parquet column** (not a meta
-  field), the v3→v2.1 converter copies it through with the rest of the row —
-  but **verify** it lands in the v2.1 `data/.../episode_*.parquet`:
-  ```bash
-  uv run python -c "
-  import pyarrow.parquet as pq, glob
-  f = sorted(glob.glob('<v21_dataset>/data/**/*.parquet', recursive=True))[0]
-  print(pq.read_table(f).column_names)"   # expect 'is_success'
-  ```
-- Stage 1 schema is now pinned (vendored `compute_returns.py`); no adapter
-  needed beyond emitting the `is_success` column in Task 1.
+- limb emits LeRobot **v3.0**. pistar / openpi's lerobot 0.1.0 reads **v2.1**,
+  so run `openpi/scripts/convert_v3_to_v21.py` before training. **The five
+  pistar columns survive trivially** — the v3→v2.1 script only symlinks the
+  data parquets under new names (`file-NNN.parquet` →
+  `episode_NNNNNN.parquet`) and rewrites only the meta files (`info.json`,
+  `tasks.jsonl`, `episodes.jsonl`, `episodes_stats.jsonl`). The parquet
+  contents (including `adv_ind` as a `string` column) are byte-identical to
+  the v3.0 source.
+- The five-column schema matches `pistar_rlds_demo_processing.py` exactly,
+  so no adapter is needed — pistar's `train.py` / `train_value.py` /
+  `label_advantage_from_vlm.py` ingest the dataset directly.
 
 ---
 
@@ -246,28 +296,42 @@ Per episode:
 Aim for ~50 episodes of mixed outcomes — RECAP needs signal from **both**
 successes and failures, so don't filter at collection time.
 
-### 4. Convert and upload
+### 4. Convert with `--pistar`
 
 ```bash
 uv run limb convert-lerobot \
   --input-dir recordings/<session> \
-  --output-dir datasets/<task>_recap_v1 \
-  --target-fps 30
-# (after Task 1, this carries per-episode success)
+  --output-dir datasets/<task>_pistar_v1 \
+  --target-fps 30 \
+  --include-arms left right \
+  --pistar           # emit intervention/reward/reward_label/value_label/adv_ind
+
+# Note: DAgger sessions record FOUR arms (followers + leaders). Without
+# --include-arms the converter would produce a 28-dim state/action; the
+# policy only needs the followers (14-D).
+
+# v3.0 → v2.1 for pistar/openpi
+uv run python openpi/scripts/convert_v3_to_v21.py \
+  --src=datasets/<task>_pistar_v1 \
+  --dst=datasets/<task>_pistar_v1_v21
 
 uv run limb upload \
-  --source datasets/<task>_recap_v1 \
-  --target hf://<user>/<task>_recap_v1
+  --source datasets/<task>_pistar_v1_v21 \
+  --target hf://<user>/<task>_pistar_v1
 ```
 
-### 5. Train
+### 5. Train (pistar)
 
-See `openpi/docs/recap_finetune.md` (RLinf Stages 1–4 on OpenPI).
+See `openpi/docs/recap_finetune.md`. High-level: merge demo + rollout
+datasets → `scripts/train_value.py` → `scripts/label_advantage_from_vlm.py`
+(rewrites `adv_ind` on rollout frames) → `scripts/train.py` to continue
+PiStar fine-tuning with `adv_ind`-conditioned tokens.
 
 ### 6. Iterate
 
-Serve the RECAP checkpoint, repeat from step 3 tagging the new dataset `v2`.
-RLinf keys returns/advantages by `<tag>`, so rounds coexist.
+Serve the PiStar checkpoint, repeat from step 3 to collect a new rollout
+batch, merge it into the dataset, and re-run Stages 5. The VLM relabels
+adv_ind for the new rollout frames each round.
 
 ---
 
@@ -284,18 +348,20 @@ RLinf keys returns/advantages by `<tag>`, so rounds coexist.
    identity too. Separate sessions per task.
 4. **Episode count > episode length.** Aim for 20–50 episodes of 30–60 s. The
    value model just needs enough successes/failures to fit.
-5. **Label honestly.** `episode_success` is the *only* required RECAP signal
-   limb adds — a mislabeled episode poisons return computation directly. When
-   unsure, mark FAILURE (SPACE) or discard (`d`).
+5. **Label honestly.** The SUCCESS/FAILURE marker drives `reward` and
+   `value_label` for the whole episode — a mislabeled episode poisons VLM
+   training directly. When unsure, mark FAILURE (SPACE) or discard (`d`).
 
 ---
 
 ## What this doc does NOT cover
 
-- **Value model architecture, advantage formula, CFG training, conditioning
-  token.** Those live in `openpi/docs/recap_finetune.md` and RLinf's
-  `examples/recap/`.
-- **Reward shaping.** Sparse terminal reward only; the penalty magnitude is
-  tuned at Stage 1, not at collection.
+- **VLM value model architecture, advantage labeling, conditioning token,
+  serving.** Those live in `openpi/docs/recap_finetune.md` and pistar's
+  source (`src/openpi/models/value_model.py`,
+  `scripts/label_advantage_from_vlm.py`, `src/openpi/transforms.py`).
+- **Reward shaping.** Sparse success reward only; the VLM learns the
+  return-shape from `value_label`/`reward_label`. Don't try to encode dense
+  rewards at collection.
 - **Online RL.** RECAP is *offline*. limb never sees a value model or
-  advantage label.
+  advantage label — the VLM rewrites `adv_ind` at training time.
