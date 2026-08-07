@@ -31,7 +31,7 @@ limit_gripper_force: -1
 # leader-right (can_leader_r) measured gripper range. Same as left.yaml's
 # base [1.14, 6.40]; stated explicitly so this leader's gripper calibration
 # is self-contained and won't silently break if the base value changes.
-gripper_limits: [6.40, 1.14]
+gripper_limits: [0.04, -4.91]
 # Widened soft limits for leader use (grav-comp only). See leader_left.yaml
 # for the rationale and verification procedure. i2rt adds a 0.1 rad buffer
 # on top of these (motor_chain_robot.py:206).

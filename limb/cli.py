@@ -33,11 +33,14 @@ class TeleopCommand:
 
     config_path: Tuple[str, ...] = ("configs/yam_viser_bimanual.yaml",)
     log_level: str = "INFO"
+    # Perception VLM for the SubRL coding agents (verifier/selector/reset detectors):
+    # gpt-5.5 | gemini-er | sam3_owlvit. None = whatever the config says.
+    vlm: Optional[str] = None
 
     def run(self) -> None:
         from limb.envs.launch import Args, main
 
-        main(Args(config_path=self.config_path, log_level=self.log_level))
+        main(Args(config_path=self.config_path, log_level=self.log_level, vlm=self.vlm))
 
 
 @dataclass
@@ -46,11 +49,13 @@ class RecordCommand:
 
     config_path: Tuple[str, ...] = ("configs/yam_gello_network_bimanual.yaml", "configs/collection_pedal.yaml")
     log_level: str = "INFO"
+    # Perception VLM for the SubRL coding agents: gpt-5.5 | gemini-er | sam3_owlvit.
+    vlm: Optional[str] = None
 
     def run(self) -> None:
         from limb.envs.launch import Args, main
 
-        main(Args(config_path=self.config_path, log_level=self.log_level))
+        main(Args(config_path=self.config_path, log_level=self.log_level, vlm=self.vlm))
 
 
 @dataclass

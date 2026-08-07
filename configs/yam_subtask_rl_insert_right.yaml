@@ -1,0 +1,224 @@
+# Sub-task RL — RIGHT-arm vial INSERTION into the stand (RL2), online RL on YAM.
+#
+# >>> TRAINING LOOP ONLY (user rule 2026-07-27: training and evaluation never
+# >>> share config files). Design: SubRL-VLA/docs/insert_subtask_plan.md.
+#
+# Sub-task (user spec 2026-07-31): START = gripper holding the vial ABOVE the
+# stand; END = vial fully inserted in an EMPTY hole (other holes may already
+# hold vials). pi0.5 insertion success <60% -> SubRL residual fine-tuning.
+#
+# EPISODE LOOP = VLA-APPROACH (human_resume_to "vla"): HUMAN (move the inserted
+# vial back to the TABLE) -> VLA (pi0.5 grasps it + carries it to the stand —
+# its reliable segment; entry states match eval's VLA-approach distribution by
+# construction) -> SELECTOR fires holding-above-stand -> RL insert -> VERIFIER
+# (proprio release-in-region + ONE before/after pair-diff confirm on the LEFT
+# wrist camera, ER-1.6: 16/16 on demo GT pairs) or timeout -> HUMAN.
+#
+# Serve pi0.5 SFT (same checkpoint + prompt lineage as the grasp task):
+#   cd /home/ssc/Desktop/research/limb/openpi
+#   XLA_PYTHON_CLIENT_MEM_FRACTION=0.70 SUBRL_RETURN_EMBED=1 \
+#   uv run python scripts/serve_policy.py --port=8111 policy:checkpoint \
+#       --policy.config=pi05_yam_vial_4_30fps_aug \
+#       --policy.dir=$HOME/.cache/openpi/hf/yam-vial-aug-pi05-v1-10k
+# RL backend (FRESH lineage — never the grasp stores):
+#   ~/venvs/sam3/bin/python ~/Desktop/research/SubRL-VLA/real_robot/services/subrl_rl_service.py \
+#       --replay-url http://127.0.0.1:9102 --port 9101 --device cuda \
+#       --skill insert_right --run-name insert_right_v1 --wandb-project subrl-yam-insert
+# Launch: uv run limb record --config-path configs/yam_subtask_rl_insert_right.yaml configs/rl_collection.yaml
+#
+# Calibration (2026-07-31 demo mining, link_6 in the RIGHT-arm base frame, ±2 cm
+# pad): stand region x 0.287-0.370 y 0.191-0.319; release z 0.205-0.270 (demos
+# 0.223-0.251); arrival z 0.277-0.374; held width 0.028-0.033 / effort +0.29-0.34.
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 30.0
+
+sensors:
+  cameras:
+    head_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "215122256240"
+    left_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "409122274543"
+    right_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "409122274017"
+
+robots:
+  left:  ["robot_configs/yam/left.yaml"]
+  right: ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+
+agent:
+  _target_: limb.agents.policy_learning.subtask.subtask_rl_agent.SubtaskRLAgent
+
+  vla:
+    _target_: limb.agents.policy_learning.policy_agent.YamPolicyAgent
+    client:
+      _target_: limb.agents.policy_learning.policy_client.OpenPIClient
+      host: "127.0.0.1"
+      port: 8111
+    obs_transform:
+      _target_: limb.agents.policy_learning.transforms.OpenPIObsTransform
+      state_keys: ["left-joint_pos", "left-gripper_pos", "right-joint_pos", "right-gripper_pos"]
+      image_keys:
+        cam_high: "head_camera-images-rgb"
+        cam_left_wrist: "left_wrist_camera-images-rgb"
+        cam_right_wrist: "right_wrist_camera-images-rgb"
+      image_size: [224, 224]
+      # LITERAL SFT prompt (user 2026-07-14) — same z_rl lineage as the grasp task.
+      prompt: "pick up all vials and place them in the stand"
+    action_transform:
+      _target_: limb.agents.policy_learning.transforms.ActionTransform
+      arm_names: ["left", "right"]
+      joints_per_arm: 7
+      include_vel: false
+      gripper_clip: [0.0, 2.4]
+    action_horizon: 50
+    smoothing_window: 4
+    async_inference: true
+    inference_interval_s: 1.2
+    expose_rl_features: true
+
+  rl_client:
+    _target_: limb.agents.policy_learning.subtask.rl_policy_client.RLPolicyClient
+    # DRY-RUN-SAFE default: "dummy" = zero residual = pure frozen pi0.5 through the
+    # full loop (selector/verifier/collector all live). Flip to "http" once the
+    # insert_right service is up and the first dry session looked right.
+    mode: "dummy"
+    url: "http://127.0.0.1:9101/infer"
+    action_dim: 7
+
+  machine:
+    _target_: limb.agents.policy_learning.subtask.mode_machine.SubtaskModeMachine
+    profile: "training"
+    min_mode_steps: 5
+    cooldown_steps: 5
+
+  phase_trigger:
+    _target_: limb.agents.dagger.FootPedalPhaseTrigger
+    device_path: "auto"
+    vendor_id: 0x3553
+    product_id: 0xb001
+    pause_resume_key: "KEY_A"
+    correction_key: "KEY_B"
+
+  # INSERT verifier: proprio-first (release event inside the stand region at
+  # release-band z after a sustained hold), then ONE before/after pair-diff
+  # confirm (VialDetector.check_inserted, SUBRL_INSERT_MODEL default
+  # gemini-robotics-er-1.6-preview — 16/16 on demo GT pairs, ~4 s; latency is
+  # off the control path: event-conditioned, once per episode). Verdicts:
+  # success -> reward 1 | failed -> unrecoverable (vial fell) | not_done ->
+  # keep running | cannot_tell / timeout -> lenient proprio success.
+  verifiers:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_verifiers
+    artifacts_dir: "/home/ssc/Desktop/research/SubRL-VLA/real_robot/artifacts/vials_insert"
+    class_name: "VialsInsertVerifiers"
+    side: "right"
+    table_z: 0.065
+    # RECALIBRATED 2026-08-03 from live session 204341: the scene layout CHANGED
+    # since the 07-30 demos (insertion releases observed at y +0.163/-0.166/-0.131
+    # vs the demo band y 0.211-0.319) — the old region never matched and the insert
+    # selector could not fire (zero rollouts collected). The region is now the
+    # observed carry/release envelope +-2 cm; with the stand near y~0, xy no longer
+    # separates table from stand — separation is carried by GRIPPER STATE (insert =
+    # holding, grasp = open), the z-bands, the SAM3 lanes, and the ER pair check.
+    stand_region: [0.220, 0.430, -0.210, 0.210]   # soft prefilter/metadata since
+    release_z_band: [0.205, 0.270]             # 2026-08-03: EVERY release goes
+                                               # to the ER pair check; the episode
+                                               # terminates on its verdict
+    min_hold_frames: 15
+    open_ramp_ticks: 6           # replay bug #1: the gripper-open sweep spends 2-3
+                                 # ticks in the 0.15<w<0.5 dead zone — the candidate
+                                 # accepts the open crossing within this window
+    after_delay_frames: 36       # AFTER frame at ~1.2 s post-open (replay bug #4:
+                                 # at +0.6 s the retracting arm still occluded the
+                                 # stand in 1/8 demos -> false not_done)
+    confirm_retries: 2           # not_done -> retry with a LATER after frame
+
+    confirm_timeout_s: 15.0      # ER ran up to 6.9 s — 8 s left no headroom
+    confirm_cameras: ["right_wrist_camera", "head_camera"]
+                                 # (user 2026-08-03) OWN wrist primary + HEAD second:
+                                 # the head always has the stand in view, so its
+                                 # not_done answers are informative — unlike the
+                                 # parked left wrist, which now sees bare table
+                                 # (scene moved) and was dropped from this list.
+    drop_frames: 45              # ~1.5 s of lost hold with no release = vial slipped
+    detector:
+      _target_: limb.agents.policy_learning.subtask.perception.make_vial_detector
+      backend: "sam3"            # detection lane (resume cue vial-on-table);
+                                 # check_inserted rides the same instance -> LiteLLM
+      request_timeout_s: 30.0
+      throttle_s: 2.0
+
+  # Auto-reset UNUSED here (human_reset_only + VLA-approach loop); block kept so the
+  # agent wires up — RESET mode is unreachable. Loads the GRASP artifacts' reset.
+  reset_policy:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_reset
+    table_z: 0.065
+    control: "ik_servo"
+    seed: null
+    step_rad: 0.01
+
+  # INSERT selector: VLA -> RL when the gripper is HOLDING the vial (width band +
+  # sustained motor effort — contact evidence, not proximity) ABOVE the stand.
+  # No VLM / no detector on the entry path (user latency rule; SAM3's prompt
+  # excludes gripper-held vials so no detection lane could confirm this anyway).
+  selector:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_selector
+    artifacts_dir: "/home/ssc/Desktop/research/SubRL-VLA/real_robot/artifacts/vials_insert"
+    class_name: "VialsInsertSelector"
+    side: "right"
+    table_z: 0.065
+    start_frames: 3
+    stand_region: [0.220, 0.410, -0.210, 0.210]
+    approach_z_min: 0.25         # above the release band (0.205-0.270)...
+    approach_z_max: 0.42         # ...through the demo carry heights (arrival 0.277-0.374)
+    # Wrist-camera STAND confirm at entry (user 2026-07-31): LOCAL SAM3 stand lane
+    # (rack segment / hole-grid cap boxes >= 6) — the wrist must SEE the stand
+    # below before the insert skill starts; no VLM on the switching path.
+    detector:
+      _target_: limb.agents.policy_learning.subtask.perception.make_vial_detector
+      backend: "sam3"
+      request_timeout_s: 30.0
+      throttle_s: 2.0
+
+  skill_label: "rl2_insert"      # phase log/TUI/phase.npy label for the RL mode
+  use_vla_approach: true
+  human_reset_only: true         # HUMAN phase machinery (no auto-reset)...
+  human_resume_to: "vla"         # ...but HUMAN resumes to the VLA-approach loop:
+                                 # pi0.5 re-grasps the staged table vial every episode
+  # RL budget: demo insertions run 2.2-4.4 s arrival->release + ~0.6 s AFTER frame
+  # + up to 8 s confirm -> 450 ticks (~15 s @30 Hz) leaves exploration headroom.
+  rl_timeout_steps: 450
+
+  escalator:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_escalator
+
+  collector:
+    _target_: limb.agents.policy_learning.subtask.rollout_collector.RolloutCollector
+    out_dir: "recordings/subtask_rl_insert_right"
+    save_frames_every: 6
+    push_url: "http://127.0.0.1:9102/extend"          # insert_right replay (--skill insert_right)
+    episode_log_url: "http://127.0.0.1:9101/episode"
+
+  controlled_indices: [7, 8, 9, 10, 11, 12, 13]       # RIGHT arm sub-action space
+  left_mode: "vla"               # left arm follows pi0.5 (single dual-arm VLA)
+  chunk_len: 50
+
+  fk:
+    _target_: limb.agents.policy_learning.subtask.fk.EEPoseInjector
+    sides: ["right"]
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]

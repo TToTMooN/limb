@@ -7,6 +7,7 @@ create its own (standalone mode for GELLO / VR agents).
 
 import os
 import threading
+import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,7 @@ class ViserMonitor:
         enable_urdf: bool = False,
         bimanual: bool = False,
         right_arm_extrinsic: Optional[Dict[str, Any]] = None,
+        render_hz: float = 30.0,
     ) -> None:
         self.viser_server = viser_server if viser_server is not None else viser.ViserServer()
         self._image_size = image_size
@@ -78,6 +80,23 @@ class ViserMonitor:
         @self._record_button.on_click
         def _(_event: viser.GuiEvent) -> None:
             self._toggle_recording()
+
+        # --- Background rendering ---
+        # All rendering (image resize + websocket push + URDF update) is heavy
+        # and only needs ~30 Hz for a human watching the web UI.  Running it
+        # inline in the 100 Hz control loop both burns 20-50 ms/tick AND
+        # saturates a core in the main process, starving the Portal RPC client
+        # threads (agent.act, robot.*).  So `update()` only stashes the latest
+        # obs (near-zero cost) and this worker thread does the actual render at
+        # a capped rate.  The control loop never blocks on viser again.
+        self._render_dt = 1.0 / render_hz if render_hz > 0 else 0.0
+        self._pending_obs: Any = None
+        self._obs_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._render_thread = threading.Thread(
+            target=self._render_worker, name="viser-monitor-render", daemon=True
+        )
+        self._render_thread.start()
 
     # ------------------------------------------------------------------ #
     #  URDF setup
@@ -113,7 +132,34 @@ class ViserMonitor:
     # ------------------------------------------------------------------ #
 
     def update(self, obs: Any) -> None:
-        """Feed a new observation into the monitor (thread-safe).
+        """Hand the latest observation to the background renderer (non-blocking).
+
+        This is called from the control loop, so it must stay cheap: it only
+        stores a reference to the most recent obs.  The actual rendering (image
+        resize, websocket push, URDF update, recording) happens on a separate
+        thread at a capped rate — see :meth:`_render_worker`.
+        """
+        with self._obs_lock:
+            self._pending_obs = obs
+
+    def _render_worker(self) -> None:
+        """Background loop: render the most recent obs at the capped rate."""
+        while not self._stop_event.is_set():
+            t0 = time.perf_counter()
+            with self._obs_lock:
+                obs = self._pending_obs
+                self._pending_obs = None
+            if obs is not None:
+                try:
+                    self._render(obs)
+                except Exception as e:  # never let a render error kill the thread
+                    logger.warning(f"ViserMonitor render error: {e}")
+            sleep_for = self._render_dt - (time.perf_counter() - t0)
+            # Wait on the stop event so close() returns promptly.
+            self._stop_event.wait(max(sleep_for, 0.001))
+
+    def _render(self, obs: Any) -> None:
+        """Render one observation into the Viser UI (runs on the worker thread).
 
         Accepts either a typed ``Observation`` (from the main process) or a
         plain dict (when embedded inside an agent subprocess via portal RPC).
@@ -166,7 +212,10 @@ class ViserMonitor:
                     writer.write(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
 
     def close(self) -> None:
-        """Release all video writers and stop recording."""
+        """Stop the render thread, release all video writers and stop recording."""
+        self._stop_event.set()
+        if self._render_thread.is_alive():
+            self._render_thread.join(timeout=2.0)
         with self._lock:
             if self._recording:
                 for w in self._writers.values():

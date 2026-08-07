@@ -1,0 +1,296 @@
+# Sub-task RL — right-arm VIAL GRASP, online RL + coding-agent auto-reset on YAM.
+#
+# >>> TRAINING LOOP ONLY (user rule 2026-07-27: training and evaluation are
+# >>> different loops and never share config files). The evaluation loop is the
+# >>> fully STANDALONE configs/yam_subtask_rl_eval.yaml — do not overlay eval
+# >>> settings onto this file, and never launch eval from it.
+#
+#
+# Adapted from yam_dagger_pi0_bimanual.yaml (RECAP: https://github.com/Destiny000621/RECAP).
+# RECAP is DAgger — 3 phases AUTONOMOUS / PAUSED / CORRECTING, where a human teleop-CORRECTS
+# and the corrections are collected offline to SFT the policy. Our loop is ONLINE RL, so the
+# whole pipeline changes:
+#
+#   RECAP DAgger (offline)                 SubRL (online RL + auto-reset)
+#   -----------------------------------    -----------------------------------------------
+#   AUTONOMOUS (policy drives)             RL     : pi0.5 + bounded RL residual on the RIGHT arm
+#   CORRECTING (human bilateral teleop)    (none) : no per-episode human teleop
+#   PAUSED                                 HUMAN  : RoboClaw 'Call Human' ONLY on unrecoverable
+#   (human stages the scene)              RESET  : coding-agent EAP inverse -> vial to a RANDOM (x,y)
+#   corrections -> dataset -> SFT          verifier reward -> replay -> RLT learner -> actor
+#
+#   loop:  RESET (random-place vial) -> RL (grasp + STABLE lift) -> verify
+#            success       -> RESET (next episode, new random vial pose)
+#            recoverable   -> keep trying (missed grasp, vial upright)
+#            unrecoverable -> CALL HUMAN (vial on floor) -> resume on start_ok
+#   Eval: vials at RANDOM positions on the table (same distribution the reset produces).
+#
+# Perception NOW = GPT-5.5 (OpenAI API; Gemini-ER misdetected the rack); SAM3+OWLv2 on the H200 later
+#   (set SUBRL_PERCEPTION_BACKEND=sam3_owlvit + SUBRL_OWLVIT_URL/SUBRL_SAM3_URL). See
+#   SubRL-VLA/deploy/h200_perception_setup.md.
+#
+# Serve pi0.5 SFT checkpoint (separate shell; full commands in
+# SubRL-VLA/real_robot/services/SERVICES.md):
+#   cd /home/ssc/Desktop/research/limb/openpi
+#   XLA_PYTHON_CLIENT_MEM_FRACTION=0.70 SUBRL_RETURN_EMBED=1 \
+#   uv run python scripts/serve_policy.py --port=8111 policy:checkpoint \
+#       --policy.config=pi05_yam_vial_4_30fps_aug \
+#       --policy.dir=$HOME/.cache/openpi/hf/yam-vial-aug-pi05-v1-10k    # -> :8111
+# Online RL services (openpi-RLT; separate shells): actor :9101, replay :9102, learner.
+#
+# Launch (autonomous online loop):
+#   uv run limb teleop  --config-path configs/yam_subtask_rl_grasp.yaml
+#   uv run limb record  --config-path configs/yam_subtask_rl_grasp.yaml configs/collection.yaml
+#
+# SHIPPED DEFAULTS ARE DRY-RUN-SAFE (review): rl_client mode "dummy" (zero residual =
+# pure frozen pi0.5) and no replay push. To go LIVE, flip the three "LIVE:" lines below
+# (rl_client.mode+url, collector.push_url) once the openpi-RLT services are up AND the
+# wire format (JSON vs msgpack) has been reconciled.
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 30.0
+
+sensors:
+  cameras:
+    head_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "215122256240"
+    left_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "409122274543"
+    right_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "409122274017"
+
+robots:
+  left:  ["robot_configs/yam/left.yaml"]
+  right: ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+
+agent:
+  _target_: limb.agents.policy_learning.subtask.subtask_rl_agent.SubtaskRLAgent
+
+  # Frozen VLA = pi0.5 SFT (~/.cache/openpi/hf/yam-vial-aug-pi05-v1-10k), served on :8111.
+  # Transforms verbatim from yam_dagger_pi0_bimanual.yaml (the YAM pi0.5 repack).
+  vla:
+    _target_: limb.agents.policy_learning.policy_agent.YamPolicyAgent
+    client:
+      _target_: limb.agents.policy_learning.policy_client.OpenPIClient
+      host: "127.0.0.1"      # client CONNECT address (0.0.0.0 is a bind address; review L29)
+      port: 8111
+    obs_transform:
+      _target_: limb.agents.policy_learning.transforms.OpenPIObsTransform
+      state_keys: ["left-joint_pos", "left-gripper_pos", "right-joint_pos", "right-gripper_pos"]
+      image_keys:
+        cam_high: "head_camera-images-rgb"
+        cam_left_wrist: "left_wrist_camera-images-rgb"
+        cam_right_wrist: "right_wrist_camera-images-rgb"
+      image_size: [224, 224]
+      # SWITCHED 2026-07-14 (user): now the LITERAL SFT prompt — training injected
+      # this default_prompt into every sample (the repack drops dataset task
+      # strings; prompt_from_task=False), so this is pi0.5's in-distribution
+      # conditioning. Sessions BEFORE 2026-07-14 ran "Grasp the vitals and insert
+      # them in a stand" instead; z_rl is prompt-conditioned, so replay/checkpoints
+      # from those sessions are a DIFFERENT lineage — start RL training fresh
+      # (wipe ~/subrl_runs/replay_journal.pkl + learner.pt) after this switch.
+      prompt: "pick up all vials and place them in the stand"
+    action_transform:
+      _target_: limb.agents.policy_learning.transforms.ActionTransform
+      arm_names: ["left", "right"]
+      joints_per_arm: 7
+      include_vel: false
+      gripper_clip: [0.0, 2.4]
+    action_horizon: 50
+    smoothing_window: 4
+    # ASYNC inference (LeRobot-style: act from the current chunk while the next one
+    # computes) — act() never blocks on the ~260 ms pi0.5 round-trip, freeing the 30 Hz
+    # loop for the coding agents (verifier/selector/detector). ROOT CAUSE of the
+    # 2026-07-06 'arm not moving' regression: inference_interval_s was UNSET -> back-to-
+    # back inference replaced the chunk every ~8 steps, so only the first few actions
+    # (≈ current pose) ever executed. The interval below lets ~35 of 50 actions run
+    # before the (latency-compensated, blended) replacement arrives.
+    async_inference: true
+    inference_interval_s: 1.2
+    expose_rl_features: true       # emit z_rl (image_embedding) + ref_chunk for the RLT actor/replay
+
+  # RL residual actor -> openpi-RLT actor service (:9101). Chunk-level residual on the RIGHT arm.
+  # Actor outages fall back to a zero residual (pure frozen pi0.5) with a rate-limited warning.
+  rl_client:
+    _target_: limb.agents.policy_learning.subtask.rl_policy_client.RLPolicyClient
+    mode: "http"                         # LIVE (flipped 2026-07-08); "dummy" = pure frozen pi0.5
+    url: "http://127.0.0.1:9101/infer"   # SubRL actor service (LIVE; :9102 is the REPLAY, not the actor)
+    action_dim: 7
+
+  machine:
+    _target_: limb.agents.policy_learning.subtask.mode_machine.SubtaskModeMachine
+    profile: "training"          # RESET <-> RL <-> HUMAN
+    min_mode_steps: 5
+    cooldown_steps: 5
+
+  # Foot pedal (user 2026-07-14): L pedal toggles PAUSED <-> previous mode. Same
+  # PCsensor double pedal + bindings as yam_dagger_pi0_bimanual.yaml; the pedal
+  # device is free here because eval/RL recording uses the KEYBOARD trigger.
+  # Missing/unplugged pedal logs a warning and the loop runs without it.
+  phase_trigger:
+    _target_: limb.agents.dagger.FootPedalPhaseTrigger
+    device_path: "auto"
+    vendor_id: 0x3553
+    product_id: 0xb001
+    pause_resume_key: "KEY_A"
+    correction_key: "KEY_B"
+
+  # Coding-agent VERIFIER — image-grounded, ALWAYS (user rule: never a scripted
+  # stand-in). It is the loop's terminator: decides each RL rollout's success (the 0/1
+  # reward) and triggers the switch to auto-reset. Calibration COMPLETE 2026-07-06
+  # (LOAD_LOW 0.10 / LOAD_HOLD 0.25 / width bands / table_z).
+  verifiers:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_verifiers
+    table_z: 0.065
+    # SUCCESS = grasp + REAL sustained lift (user 2026-07-28: at 15/0.05 success
+    # fired ~5 cm above the grasp — the very onset of the lift (demos lift
+    # 5.8-6.6 cm) — and the HUMAN success-release opened the gripper instantly,
+    # so the vial visibly never lifted; grasp_v3 session 2216 cycled RL->HUMAN
+    # every few seconds on these paper successes).
+    stable_frames: 23            # ~0.75 s @ 30 Hz held+lifted window (20-of-23 hits)
+    lift_m: 0.075                # vial >= 7.5 cm above its grasp height
+    # SUCCESS scoring = PROPRIO-ONLY (the original method, user option 2026-07-07):
+    # the vial in the gripper is invisible to every camera BY DESIGN, so proprio
+    # (width band + gripper effort + lift, stable) is authoritative — RL -> RESET/
+    # HUMAN switches with ZERO added latency. Set true to additionally require the
+    # wrist-camera held-confirmation (adds up to one VLM round-trip, pre-warmed).
+    success_image_confirm: false
+    # Verifier-confirmed FALLEN -> terminate rollout (reward 0 -> HUMAN). Requires a
+    # sustained ~3 s fallen report AND a grasp attempt. Set false to DISABLE (user
+    # option 2026-07-08): fallen then only blocks the HUMAN->RL resume, and rollouts
+    # end via success/timeout only — use when SAM3 fallen mislabels are killing
+    # legitimate rollouts.
+    fallen_terminates: false
+    detector:
+      _target_: limb.agents.policy_learning.subtask.perception.make_vial_detector
+      # Backends (validated on recorded frames 2026-07-07):
+      #   "gemini_er"  - fast pointing model, precise boxes; hallucinated the RACK's
+      #                  black cap-holes as vials until the prompt excluded the rack.
+      #   "gpt"        - GPT-5.5 (OpenAI key from .api/openai_key.txt): stronger
+      #                  scene judgment (never reported the empty rack), noisier
+      #                  box localization + higher latency (8-11 s/call). Switch here (all
+      #                  three detector blocks share one instance per backend; the env
+      #                  var SUBRL_PERCEPTION_BACKEND only applies when backend is unset).
+      #   "sam3_owlvit" - once the H200 servers are up.
+      backend: "sam3"              # DETECTION lane (user 2026-07-07): SAM3 masks -> geometric
+                                   # standing/fallen/no-vial. Semantic queries (release/held
+                                   # confirmation) auto-route to Gemini-ER. REQUIRES the SAM3
+                                   # server on :8114 (SERVICES.md); until HF access is granted,
+                                   # launch with --vlm gemini-er to override.
+      request_timeout_s: 30.0    # GPT-5.5 vision calls run 8-11 s (measured); default 10 s times out
+      throttle_s: 2.0            # per-camera VLM cadence (shared detector; result cached)
+
+  # Auto-reset = the coding-agent policy (image-grounded), ALWAYS. Two entry modes:
+  #  - vial HELD (post-success): EAP inverse — carry to a RANDOM reachable xy, lower,
+  #    release gently, retract (the inverse of the grasp+lift rollout).
+  #  - nothing held (cold boot / failed grasp): STAGE the start state itself — open the
+  #    gripper, rise to observe height; done() verifies vial visible via the detector.
+  #    Vial truly gone -> unrecoverable -> Call-Human.
+  # Control = NON-BLOCKING IK-servo primitives (one bounded DLS step per tick through
+  # the normal action path). Closed-loop validated offline: test_reset_ik_servo.py 12/12.
+  reset_policy:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_reset
+    table_z: 0.065
+    control: "ik_servo"
+    seed: null                   # OS entropy; set an int only to reproduce placements
+    step_rad: 0.01               # HALF speed for the first on-robot sessions; 0.02 nominal
+    detector:
+      _target_: limb.agents.policy_learning.subtask.perception.make_vial_detector
+      backend: "sam3"              # DETECTION lane (user 2026-07-07): SAM3 masks -> geometric
+                                   # standing/fallen/no-vial. Semantic queries (release/held
+                                   # confirmation) auto-route to Gemini-ER. REQUIRES the SAM3
+                                   # server on :8114 (SERVICES.md); until HF access is granted,
+                                   # launch with --vlm gemini-er to override.
+      request_timeout_s: 30.0    # GPT-5.5 vision calls run 8-11 s (measured); default 10 s times out
+      throttle_s: 2.0
+
+  # Coding-agent SELECTOR — image-grounded, ALWAYS. Episode structure: RESET stages ->
+  # VLA APPROACHES the vial -> when the vial is CENTERED in the right wrist camera
+  # (gripper above it), the selector hands off to RL (the bottleneck grasp sub-task).
+  selector:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_selector
+    table_z: 0.065
+    # Trigger = proprio-TIMED (EE descends into the grasp zone over the TABLE pickup
+    # region, gripper still open) + image-CONFIRMED (wrist cam saw a vial). The region
+    # gate excludes the STAND, so a failed insertion can no longer trigger RL
+    # (2026-07-06 run: old wrist-center cue fired above the stand, 21 s late).
+    start_frames: 3              # proprio is 30 Hz-stable; 3 ticks = 0.1 s
+    approach_z_min: 0.03         # grasp zone above the table...
+    approach_z_max: 0.18         # ...and below stand-insertion heights (~0.21)
+    # TRAINING selector gate (regression fix 2026-07-27, session 13:46: ZERO
+    # vla->rl switches all session): boot handoffs need FRESH verdicts, not strict
+    # ones — SAM3 (~2 s cache) + the original any-camera-found confirmation.
+    # The EVAL overlay (rl_eval_inference.yaml) overrides BOTH knobs back to
+    # gemini_er + strict_wrist true, where the strict gate's transit-false-fire
+    # protection is actually needed and approaches are slow enough for Gemini.
+    strict_wrist: false
+    detector:
+      _target_: limb.agents.policy_learning.subtask.perception.make_vial_detector
+      backend: "sam3"
+      request_timeout_s: 30.0
+      throttle_s: 2.0
+  # Episode structure (user spec 2026-07-06 22:52): VLA drives ONLY the FIRST approach
+  # of the session (boot -> selector fires above the vial -> RL). After that the loop
+  # is RL <-> RESET (<-> HUMAN) forever — the auto-reset ends retracted directly ABOVE
+  # the placed vial, so every RL rollout is just grasp + lift (short-horizon). VLA<->RL
+  # switching is an inference-time behavior, never used mid-training.
+  use_vla_approach: true
+  # HUMAN-RESET-ONLY loop (user mode 2026-07-08, while the auto-reset stabilizes):
+  # NO auto-reset phase — boot VLA approach -> RL, then RL <-> HUMAN forever. Every
+  # episode end (success reward 1 / failure reward 0) hands the scene to the human;
+  # on SUCCESS the gripper opens immediately (release the lifted vial to re-stage).
+  # Resume: verified scene (~2 s after you finish) or the 15 s cap -> straight to RL.
+  # Set false to restore the autonomous RL <-> RESET loop with the coding-agent reset.
+  human_reset_only: true
+  # Short-horizon RL budget: grasp + lift-a-little from a gripper already above the
+  # vial -> 300 ticks (~10 s @30 Hz) before the reward-0 timeout ends a failed episode
+  # (tightened from 400, user 2026-07-08: higher episode throughput in the
+  # human-reset-only loop).
+  rl_timeout_steps: 300
+
+  # RoboClaw 'Call Human' on unrecoverable (vial on floor / safety). notify= optional side-channel.
+  escalator:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_escalator
+
+  # Logs 3-cam frames + states; assembles CHUNK-level RLT transitions (rewards (C,)) and
+  # pushes them to the replay on episode end. Push failures are logged LOUDLY.
+  collector:
+    _target_: limb.agents.policy_learning.subtask.rollout_collector.RolloutCollector
+    out_dir: "recordings/subtask_rl_grasp"
+    save_frames_every: 6
+    push_url: "http://127.0.0.1:9102/extend"        # LIVE (flipped 2026-07-08): openpi-RLT replay
+    episode_log_url: "http://127.0.0.1:9101/episode"  # per-episode reward -> RL service ->
+                                                      # wandb episode_reward + success_rate_10
+
+  controlled_indices: [7, 8, 9, 10, 11, 12, 13]      # right arm (single-arm sub-action-space)
+  left_mode: "vla"             # left arm FOLLOWS pi0.5 (user rule: the VLA is a single
+                               # dual-arm agent — 14-D actions, dual-arm SFT demos; freezing
+                               # the left arm makes the state OOD and degrades BOTH arms).
+                               # RL still residual-corrects ONLY the right arm.
+  # C = 50 = pi0.5's FULL action horizon (user 2026-07-08): one RL refinement per
+  # VLA chunk, boundary = the async replan (~1.2 s). Must match the RL service's
+  # --chunk-len; changing it invalidates the replay journal + learner checkpoint.
+  chunk_len: 50
+
+  # ee_pose FK injection (review C1): the YAM driver doesn't populate ee_pose in this
+  # launch path; the verifier/reset need it. Computes link_6 FK in the ARM BASE frame —
+  # the same frame table_z / PICKUP_REGION are calibrated in (scripts/data/subrl_calibrate.py).
+  fk:
+    _target_: limb.agents.policy_learning.subtask.fk.EEPoseInjector
+    sides: ["right"]
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]

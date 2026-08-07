@@ -4,6 +4,8 @@ Main launch script for YAM realtime robot control environment.
 
 import os
 import signal
+import socket
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -15,6 +17,7 @@ import numpy as np
 import tyro
 from loguru import logger
 
+from limb import ROOT_PATH
 from limb.agents.agent import Agent
 from limb.core.observation import Observation, arm_obs_from_dict
 from limb.envs.configs.instantiate import instantiate
@@ -77,9 +80,13 @@ def _build_obs_image_preprocess(agent_cfg: Dict[str, Any]) -> Optional[ObsPrepro
         xf = cfg.get("obs_transform")
         if isinstance(xf, dict):
             return xf
-        inner = cfg.get("inner_policy")
-        if isinstance(inner, dict):
-            return _find_obs_transform(inner)
+        # composite agents: DAggerAgent wraps `inner_policy`; SubtaskRLAgent wraps `vla`
+        for key in ("inner_policy", "vla"):
+            inner = cfg.get(key)
+            if isinstance(inner, dict):
+                found = _find_obs_transform(inner)
+                if found is not None:
+                    return found
         return None
 
     obs_xform_cfg = _find_obs_transform(agent_cfg)
@@ -91,6 +98,55 @@ def _build_obs_image_preprocess(agent_cfg: Dict[str, Any]) -> Optional[ObsPrepro
     h, w = int(image_size[0]), int(image_size[1])
 
     xform_target = obs_xform_cfg.get("_target_", "")
+    if "SubtaskRLAgent" in str(agent_cfg.get("_target_", "")):
+        # SubRL: the POLICY gets the padded 224 every tick (exactly the old, smooth
+        # RPC payload), and the coding agents' PERCEPTION gets an aspect-preserving
+        # 448 frame attached under images["rgb_hd"] only every hd_every-th tick.
+        # Rationale: 224 destroys the vial for SAM3 (22:47 run: fallen never
+        # escalated), but shipping 448 EVERY tick was 1.35 MB/tick of Portal payload
+        # — launch-side agent.act spiked to 170-440 ms and the loop fell to 9-17 Hz
+        # (23:15/23:40 runs) even though the agent's internal stages were <2 ms.
+        # The detector is throttled to ~0.5 Hz per camera, so ~2 Hz of HD frames
+        # (cached agent-side between arrivals) loses nothing.
+        from limb.agents.policy_learning.transforms import _resize_with_pad
+        hd_every = 15
+        state = {"n": 0}
+
+        def _hd(img):
+            H, W = img.shape[:2]
+            m = max(H, W)
+            if m <= 448:
+                return img
+            s = 448.0 / m
+            return cv2.resize(img, (int(round(W * s)), int(round(H * s))),
+                              interpolation=cv2.INTER_LINEAR)
+
+        def preprocess(obs_dict: Dict[str, Any]) -> Dict[str, Any]:
+            state["n"] += 1
+            attach_hd = (state["n"] % hd_every) == 1
+            for value in obs_dict.values():
+                if isinstance(value, dict):
+                    # Belt-and-suspenders vs the depth_data ALIAS (review 2026-08-05):
+                    # robocam duplicates depth into a top-level key that would ride
+                    # the act() RPC every tick — RealsenseDepthLite already nulls it
+                    # at the source; strip here so no camera class can regress this.
+                    value.pop("depth_data", None)
+                    imgs = value.get("images")
+                    if isinstance(imgs, dict) and "rgb" in imgs:
+                        raw = imgs["rgb"]
+                        if attach_hd:
+                            imgs["rgb_hd"] = _hd(raw)
+                        elif "depth" in imgs:
+                            # Depth mode (2026-08-05): aligned depth rides ONLY the
+                            # HD ticks — same Portal-budget rule as rgb_hd, and it
+                            # keeps the depth frame paired with the agent's cached
+                            # rgb_hd from the same tick. (Camera-side downscale in
+                            # RealsenseDepthLite already matched the hd geometry.)
+                            del imgs["depth"]
+                        imgs["rgb"] = _resize_with_pad(raw, h, w)
+            return obs_dict
+
+        return preprocess
     if "OpenPIObsTransform" in xform_target:
         # OpenPI uses aspect-preserving padded resize. Mirror it here exactly
         # so the agent-side resize is a no-op.
@@ -200,6 +256,48 @@ class LaunchConfig:
 class Args:
     config_path: Tuple[str, ...] = ("~/yam_realtime/configs/yam_viser_bimanual.yaml",)
     log_level: str = "INFO"
+    # Perception VLM override for every make_vial_detector block in the loaded config
+    # (SubRL coding agents). e.g. --vlm gpt-5.5 | --vlm gemini-er | --vlm sam3_owlvit.
+    # None = use whatever the config says.
+    vlm: Optional[str] = None
+
+
+def _normalize_vlm(name: str) -> Tuple[str, Optional[str]]:
+    """User-friendly VLM name -> (detector backend, optional model override)."""
+    n = name.strip().lower().replace("-", "_")
+    if n.startswith("gpt") or n == "openai":
+        model = name.strip().lower().replace("_", "-")
+        return "gpt", (model if any(c.isdigit() for c in model) else None)
+    if n.startswith("gemini"):
+        return "gemini_er", None
+    if "owl" in n:
+        return "sam3_owlvit", None
+    if "sam" in n:
+        return "sam3", None            # SAM 3 text-prompted segmentation + geometric pose
+    raise ValueError(f"--vlm {name!r}: expected gpt-5.5 / gemini-er / sam3 / sam3_owlvit")
+
+
+def _override_vlm(node: Any, backend: str, model: Optional[str]) -> int:
+    """Recursively set backend/model on every make_vial_detector block. Returns the
+    number of blocks overridden."""
+    from omegaconf import DictConfig, ListConfig
+    count = 0
+    if isinstance(node, (dict, DictConfig)):
+        try:
+            target = str(node.get("_target_", ""))
+        except Exception:
+            target = ""
+        if target.endswith("make_vial_detector"):
+            node["backend"] = backend
+            node["model"] = model           # None clears a stale override from another backend
+            node["request_timeout_s"] = max(float(node.get("request_timeout_s", 10.0) or 10.0), 30.0)
+            count += 1
+        for v in list(node.values()):
+            count += _override_vlm(v, backend, model)
+    elif isinstance(node, (list, tuple, ListConfig)):
+        for v in node:
+            count += _override_vlm(v, backend, model)
+    return count
 
 
 def _agent_query_bool(agent: Any, method_name: str) -> bool:
@@ -385,6 +483,74 @@ def _safe_release_robots(
         t.join(timeout=duration_s + 2.0)
 
 
+def _gello_header_probe(host: str, port: int, timeout_s: float = 4.0) -> bool:
+    """True iff a gello_position_server is accepting and streaming.
+
+    Reads the 4-byte joint-count header. A bare TCP connect is NOT enough:
+    a wedged server (captive to a stale client) still completes handshakes
+    into its listen backlog without ever accepting or sending.
+    """
+    try:
+        s = socket.socket()
+        s.settimeout(timeout_s)
+        s.connect((host, port))
+        buf = b""
+        while len(buf) < 4:
+            chunk = s.recv(4 - len(buf))
+            if not chunk:
+                return False
+            buf += chunk
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _preflight_gello_server(agent_cfg: Any) -> None:
+    """For network-GELLO agents, verify the leader server is serving before
+    anything else spins up — and auto-restart it when it isn't.
+
+    The v1 server is single-client and can be held captive by a stale
+    connection leaked by the host DLP's transparent proxy; every launch after
+    such a leak would otherwise abort at the first agent action. Launch start
+    is the one safe moment to restart automatically: the leader arms are
+    expected to be racked in their rest slots, which is exactly what the
+    server's zero-pose offset capture needs.
+    """
+    target = str(agent_cfg.get("_target_", ""))
+    host = agent_cfg.get("host", None)
+    if "YamGelloAgent" not in target or not host:
+        return
+    port = int(agent_cfg.get("network_port", 5555))
+    if _gello_header_probe(host, port):
+        logger.info(f"GELLO server at {host}:{port} is serving.")
+        return
+    logger.warning(
+        f"GELLO server at {host}:{port} is not serving (down or wedged on a stale client) — "
+        "restarting it automatically. Leader arms should be in their rest slots "
+        "(zero-pose offsets are recaptured on server start)."
+    )
+    script = os.path.join(ROOT_PATH, "scripts", "start_gello_server.sh")
+    try:
+        result = subprocess.run(
+            ["bash", script, str(host)],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            cwd=str(ROOT_PATH),
+        )
+        for line in (result.stdout or "").strip().splitlines()[-3:]:
+            logger.info(f"  [gello launcher] {line}")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        raise RuntimeError(f"GELLO server auto-restart failed to run: {e}") from e
+    if not _gello_header_probe(host, port, timeout_s=6.0):
+        raise RuntimeError(
+            f"GELLO server at {host}:{port} is still not serving after an automatic restart. "
+            f"Inspect it: ssh cat@{host} 'tail -30 ~/gello_server.log'"
+        )
+    logger.info("GELLO server restarted and serving.")
+
+
 def main(args: Args) -> None:
     """
     Main launch entrypoint.
@@ -417,6 +583,12 @@ def main(args: Args) -> None:
     try:
         logger.info("Loading configuration...")
         configs_dict = DictLoader.load([os.path.expanduser(x) for x in args.config_path])
+
+        if args.vlm:
+            backend, model = _normalize_vlm(args.vlm)
+            n = _override_vlm(configs_dict, backend, model)
+            logger.info("VLM override: --vlm {} -> backend '{}'{} on {} detector block(s)",
+                        args.vlm, backend, f" (model {model})" if model else "", n)
 
         agent_cfg = configs_dict.pop("agent")
         sensors_cfg = configs_dict.pop("sensors", None)
@@ -464,6 +636,7 @@ def main(args: Args) -> None:
             return
 
         # ----- Real hardware mode (original path) ----- #
+        _preflight_gello_server(agent_cfg)
         logger.info("Initializing sensors...")
         camera_dict, camera_info = initialize_sensors(sensors_cfg, server_processes)
 
@@ -547,7 +720,11 @@ def main(args: Args) -> None:
             initial_obs = obs.to_dict()
             if obs_preprocess is not None:
                 initial_obs = obs_preprocess(initial_obs)
-            initial_action = agent.act(initial_obs)
+            # Same guard as the control loop's act() call: a wedged portal RPC
+            # (or a leader source that never delivers data) otherwise hangs the
+            # launch here forever, silently re-sending multi-MB obs payloads.
+            with Timeout(30, "Initial agent action"):
+                initial_action = agent.act(initial_obs)
 
         # Apply any robot mode-switches the agent emitted on its first tick
         # (e.g. DAgger's leaders need position_mode before the safe-move so the
@@ -796,10 +973,13 @@ def _run_control_loop(
     start_time = time.time()
     loop_count = 0
     slow_hz_streak = 0  # consecutive 1-second windows below SLOW_HZ_FRACTION * target
-    # Track DAgger phase across ticks so we can log edges from the *main*
+    # Track the agent's phase across ticks so we can log edges from the *main*
     # process (the TUI's Rich-aware sink) instead of relying on the agent
     # subprocess's stderr which can be clobbered by Live-panel redraws.
     last_phase_seen: Optional[str] = None
+    # Label for phase-edge logs: agents may provide their own (e.g. the SubRL
+    # online-RL loop -> "SubRL loop"); default keeps the DAgger wording.
+    phase_log_label = _agent_query_str(agent, "phase_log_label") or "DAgger phase" 
 
     obs = env.reset()
 
@@ -843,7 +1023,7 @@ def _run_control_loop(
         # TUI's Rich sink (subprocess stderr can be clobbered by Live redraws).
         if phase is not None and phase != last_phase_seen:
             if last_phase_seen is not None:
-                logger.info("DAgger phase: {} -> {}", last_phase_seen, phase)
+                logger.info("{}: {} -> {}", phase_log_label, last_phase_seen, phase)
             last_phase_seen = phase
             # Mirror to the TUI panel so the operator can see the current
             # phase even when no session is providing SessionState.

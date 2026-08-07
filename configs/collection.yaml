@@ -11,9 +11,9 @@
 
 collection:
   _target_: limb.recording.session.DataCollectionSession
-  num_episodes: 10
-  task_instruction: "pick up the red cube and place it in the bowl"
-  countdown_s: 3.0
+  num_episodes: 30
+  task_instruction: "Pick up all vials and place them in the stand."
+  countdown_s: 1.0
   recorder:
     _target_: limb.recording.episode_recorder.EpisodeRecorder
     base_dir: "recordings"

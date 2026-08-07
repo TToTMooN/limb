@@ -109,7 +109,7 @@ agent:
         cam_left_wrist: "left_wrist_camera-images-rgb"
         cam_right_wrist: "right_wrist_camera-images-rgb"
       image_size: [224, 224]
-      prompt: "place the vial into the stand"   # required for VLAs
+      prompt: "Grasp the vitals and insert them in a stand"   # required for VLAs
     action_transform:
       _target_: limb.agents.policy_learning.transforms.ActionTransform
       arm_names: ["left", "right"]

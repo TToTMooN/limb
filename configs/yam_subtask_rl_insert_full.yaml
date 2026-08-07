@@ -1,0 +1,293 @@
+# Sub-task RL — INSERT training in the FULL TASK (user design 2026-07-31).
+#
+# >>> TRAINING LOOP (standalone; never shared with eval configs).
+# >>> Design doc: SubRL-VLA/docs/insert_subtask_plan.md (full-task protocol).
+#
+# Scene = N vials on the table (vials_per_scene, e.g. 4). The loop runs the WHOLE
+# task autonomously with TWO RL skills:
+#   VLA approach -> [AUX: trained grasp RL1, FROZEN actor] grasp+lift -> VLA
+#   carries to the stand -> [PRIMARY: insert RL2, LEARNING] insertion rollout
+#   (collected + pushed to replay) -> VLA -> next vial ... xN.
+# Occupied stand holes ACCUMULATE across the scene — exactly the distribution
+# pi0.5 fails on (imprecise empty-hole localization; inserting into occupied
+# holes). HUMAN touches the scene ONLY when all N vials are inserted (batch
+# restage: put every vial back on the table) or on unrecoverable.
+# 4-vial full-task demo reference: hf.co/datasets/Sichang0621/vials_4_30fps_180
+#
+# SERVICES (three, separate shells):
+#   # pi0.5 serve (:8111) — same as always, SUBRL_RETURN_EMBED=1 required
+#   cd /home/ssc/Desktop/research/limb/openpi
+#   XLA_PYTHON_CLIENT_MEM_FRACTION=0.70 SUBRL_RETURN_EMBED=1 \
+#   uv run python scripts/serve_policy.py --port=8111 policy:checkpoint \
+#       --policy.config=pi05_yam_vial_4_30fps_aug \
+#       --policy.dir=$HOME/.cache/openpi/hf/yam-vial-aug-pi05-v1-10k
+#   # INSERT learner (:9101 + replay :9102) — the LEARNING skill's fresh lineage
+#   ~/venvs/sam3/bin/python ~/Desktop/research/SubRL-VLA/real_robot/services/subrl_rl_service.py \
+#       --replay-url http://127.0.0.1:9102 --port 9101 --device cuda \
+#       --skill insert_right --run-name insert_right_v1 --wandb-project subrl-yam-insert \
+#       --warmup-episodes 20
+#   # GRASP frozen actor (:9103) — read-only eval mode on the trained snapshot
+#   ~/venvs/sam3/bin/python ~/Desktop/research/SubRL-VLA/real_robot/services/subrl_rl_service.py \
+#       --port 9103 --device cuda --no-learner --no-wandb --no-with-replay \
+#       --ckpt ~/Desktop/research/SubRL-VLA/checkpoints/grasp_right/ep0050_20260729_1717/learner.pt
+#   # lingbot-depth detector (:8115) — LAUNCH FIRST on GPU (needs ~2 GB). Since
+#   # 2026-08-05 it carries ALL vial detect lanes (entry + verifier cues, all
+#   # cameras; RGB-only — the benchmarked mode, no depth stream needed) — if it
+#   # is down, entries block and vial cues go unavailable.
+#   #   1. ~/venvs/lingbot/bin/python ~/Desktop/research/SubRL-VLA/real_robot/services/serve_lingbot_depth.py --port 8115 --device cuda
+#   #   2. pi0.5 serve with XLA_PYTHON_CLIENT_MEM_FRACTION=0.62 (was 0.70; if the
+#   #      serve OOMs, raise back and run lingbot on cpu or revert this lane to sam3)
+#   #   3. SAM3 (:8114) — still REQUIRED, but rack lanes only: insert entry
+#   #      confirm + grasp stand veto ("stand:" keys route there by prefix).
+#   # Preflight: curl -s http://127.0.0.1:8115/health -> {"ok":true,"device":"cuda"}
+# Launch: uv run limb record --config-path configs/yam_subtask_rl_insert_full.yaml configs/rl_collection.yaml
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 30.0
+
+sensors:
+  cameras:
+    # Depth stream OFF (user 2026-08-05): lingbot_depth runs RGB-only — the mode
+    # every benchmark used; real sensor depth is optional conditioning it doesn't
+    # need. The full plumbing (RealsenseDepthLite + HD-tick forwarding +
+    # send_depth) stays in the code, dormant — flip camera _target_ to
+    # RealsenseDepthLite + enable_depth: true + send_depth: true to revive.
+    # BEFORE reviving (review 2026-08-05): re-run the standing/fallen benchmark on
+    # a real aligned RGB+depth GT set — the classifier gates were tuned on
+    # RGB-only completion outputs and have never been validated on sensor depth.
+    head_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "215122256240"   # D455 (depth units 1e-3 m if ever enabled)
+    left_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "409122274543"
+    right_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "409122274017"   # D405 (depth units 1e-4 m if ever enabled)
+
+robots:
+  left:  ["robot_configs/yam/left.yaml"]
+  right: ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+
+agent:
+  _target_: limb.agents.policy_learning.subtask.subtask_rl_agent.SubtaskRLAgent
+
+  vla:
+    _target_: limb.agents.policy_learning.policy_agent.YamPolicyAgent
+    client:
+      _target_: limb.agents.policy_learning.policy_client.OpenPIClient
+      host: "127.0.0.1"
+      port: 8111
+    obs_transform:
+      _target_: limb.agents.policy_learning.transforms.OpenPIObsTransform
+      state_keys: ["left-joint_pos", "left-gripper_pos", "right-joint_pos", "right-gripper_pos"]
+      image_keys:
+        cam_high: "head_camera-images-rgb"
+        cam_left_wrist: "left_wrist_camera-images-rgb"
+        cam_right_wrist: "right_wrist_camera-images-rgb"
+      image_size: [224, 224]
+      prompt: "pick up all vials and place them in the stand"
+    action_transform:
+      _target_: limb.agents.policy_learning.transforms.ActionTransform
+      arm_names: ["left", "right"]
+      joints_per_arm: 7
+      include_vel: false
+      gripper_clip: [0.0, 2.4]
+    action_horizon: 50
+    smoothing_window: 4
+    async_inference: true
+    inference_interval_s: 1.2
+    expose_rl_features: true
+
+  # ---- PRIMARY skill: INSERT (LEARNING — collected + pushed) -----------------
+  rl_client:
+    _target_: limb.agents.policy_learning.subtask.rl_policy_client.RLPolicyClient
+    # DRY-RUN-SAFE default; flip to "http" once the insert service is live.
+    mode: "dummy"
+    url: "http://127.0.0.1:9101/infer"
+    action_dim: 7
+
+  verifiers:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_verifiers
+    artifacts_dir: "/home/ssc/Desktop/research/SubRL-VLA/real_robot/artifacts/vials_insert"
+    class_name: "VialsInsertVerifiers"
+    side: "right"
+    table_z: 0.065
+    # RECALIBRATED 2026-08-03 from live session 204341: the scene layout CHANGED
+    # since the 07-30 demos (insertion releases observed at y +0.163/-0.166/-0.131
+    # vs the demo band y 0.211-0.319) — the old region never matched and the insert
+    # selector could not fire (zero rollouts collected). The region is now the
+    # observed carry/release envelope +-2 cm; with the stand near y~0, xy no longer
+    # separates table from stand — separation is carried by GRIPPER STATE (insert =
+    # holding, grasp = open), the z-bands, the SAM3 lanes, and the ER pair check.
+    stand_region: [0.220, 0.430, -0.210, 0.210]   # soft prefilter/metadata since
+    release_z_band: [0.205, 0.270]             # 2026-08-03: EVERY release goes
+                                               # to the ER pair check; the episode
+                                               # terminates on its verdict
+    min_hold_frames: 15
+    open_ramp_ticks: 6           # replay bug #1: the gripper-open sweep spends 2-3
+                                 # ticks in the 0.15<w<0.5 dead zone — the candidate
+                                 # accepts the open crossing within this window
+    after_delay_frames: 36       # AFTER frame at ~1.2 s post-open (replay bug #4:
+                                 # at +0.6 s the retracting arm still occluded the
+                                 # stand in 1/8 demos -> false not_done)
+    confirm_retries: 2           # not_done -> retry with a LATER after frame
+
+    confirm_timeout_s: 15.0      # ER ran up to 6.9 s — 8 s left no headroom
+    confirm_cameras: ["right_wrist_camera", "head_camera"]
+                                 # (user 2026-08-03) OWN wrist primary + HEAD second:
+                                 # the head always has the stand in view, so its
+                                 # not_done answers are informative — unlike the
+                                 # parked left wrist, which now sees bare table
+                                 # (scene moved) and was dropped from this list.
+    drop_frames: 45
+    # THE canonical detector block (user 2026-08-05): ALL FOUR detector blocks in
+    # this config are IDENTICAL and collapse to ONE shared lingbot_depth instance
+    # (make_vial_detector shares by backend string; the FIRST construction's kwargs
+    # win — keep every copy byte-identical). Vial detect lanes (visible/standing/
+    # fallen cues, all cameras) = lingbot metric-depth geometry — SAM3's mask only
+    # catches the transparent tube's cap, so its standing/fallen verdicts were
+    # wrong; lingbot was 6/6 on GT. The "stand:" rack lanes (insert entry confirm
+    # + grasp veto) still key-prefix-route to SAM3 :8114 (rack segmentation needs
+    # a promptable segmenter), and the ER before/after pair check is unchanged.
+    # REQUIRES :8115 up (see header launch order). DEPTH MODE: aligned HD-tick
+    # depth rides each detect request with per-camera scale + probed intrinsics.
+    detector: &lingbot_detector
+      _target_: limb.agents.policy_learning.subtask.perception.make_vial_detector
+      backend: "lingbot_depth"
+      request_timeout_s: 10.0
+      throttle_s: 1.0            # lingbot is fast (112 ms GPU) — every lane at 1 s
+      workers: 4                 # one instance now carries detect + stand + ER lanes
+      audit_dir: "logs/perception_audit"   # keep offline-gradable verdicts+frames
+      lane_throttles:
+        "stand:": 4.0            # the SAM3 rack lanes keep their 2026-08-04 budget
+      send_depth: false          # RGB-only (user 2026-08-05); scales/intrinsics
+                                 # below are inert documentation until revived
+      depth_scales:              # meters per unit — PER CAMERA (probed 2026-08-05)
+        right_wrist_camera: 0.0001   # D405 = 100 um units
+        left_wrist_camera: 0.0001
+        head_camera: 0.001           # D455 = mm units
+      intrinsics:                # color fx, fy, cx, cy at 640x480 (probed 2026-08-05);
+        right_wrist_camera: [392.0, 391.8, 311.6, 239.9]   # sent ONLY alongside depth
+        left_wrist_camera: [392.9, 392.7, 319.1, 240.1]    # so the benchmarked RGB-
+        head_camera: [383.5, 383.1, 327.4, 243.4]          # only path stays fx=615
+
+  selector:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_selector
+    artifacts_dir: "/home/ssc/Desktop/research/SubRL-VLA/real_robot/artifacts/vials_insert"
+    class_name: "VialsInsertSelector"
+    side: "right"
+    table_z: 0.065
+    start_frames: 3
+    stand_region: [0.220, 0.410, -0.210, 0.210]
+    approach_z_min: 0.25
+    approach_z_max: 0.42
+    # Wrist-camera STAND confirm at entry (user 2026-07-31): the "stand:" lane —
+    # key-prefix-routed to SAM3 regardless of backend; alias = the shared instance.
+    detector: *lingbot_detector
+
+  rl_timeout_steps: 450          # insert budget (demo 2.2-4.4 s + confirm headroom)
+
+  # ---- AUX skill: GRASP (FROZEN trained RL1 — never collected) ---------------
+  aux_rl_client:
+    _target_: limb.agents.policy_learning.subtask.rl_policy_client.RLPolicyClient
+    mode: "http"
+    url: "http://127.0.0.1:9103/infer"   # --no-learner actor on the grasp snapshot
+    action_dim: 7
+    deterministic: true                  # frozen skill: actor mean, no exploration
+
+  aux_verifiers:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_verifiers
+    table_z: 0.065                       # grasp verifier (vials_grasp artifacts)
+    stable_frames: 23                    # grasp success rule as trained (2026-07-28)
+    lift_m: 0.075
+    success_image_confirm: false
+    fallen_terminates: false
+    # vial-lost / standing-fallen scene cues -> lingbot (shared instance alias).
+    detector: *lingbot_detector
+
+  aux_selector:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_selector
+    table_z: 0.065                       # grasp entry = the eval-validated STRICT
+    start_frames: 3                      # SAM3 wrist gate (standing vial CENTERED
+    approach_z_min: 0.03                 # under the gripper; local, no VLM)
+    approach_z_max: 0.18
+    strict_wrist: true
+    # STAND VETO (2026-08-03): the moved stand overlaps the pickup region — block
+    # grasp entries when the wrist recently saw the rack (mirror of the insert latch).
+    stand_veto: true
+    # DETECT lane = lingbot_depth (user 2026-08-04): metric-depth vial detection at
+    # ~112 ms GPU — fixes the SAM3-staleness late/missed entries (GT diagnosis
+    # 213025: all five missed moments had passing gates but 5-15 s stale verdicts)
+    # AND classifies fallen vials correctly (SAM3's transparent-tube blind spot).
+    # REQUIRES services/serve_lingbot_depth.py on :8115 (GPU) — if it is down the
+    # grasp entry BLOCKS (logged: "entry BLOCKED by primary detector"). The
+    # stand-veto lane still routes to SAM3 (:8114) through this same instance.
+    detector: *lingbot_detector
+
+  aux_rl_timeout_steps: 300              # grasp budget (as in grasp training)
+
+  # ---- full-task loop wiring -------------------------------------------------
+  machine:
+    _target_: limb.agents.policy_learning.subtask.mode_machine.SubtaskModeMachine
+    profile: "inference"                 # VLA <-> RL <-> HUMAN (full task)
+    min_mode_steps: 5
+    cooldown_steps: 5
+  full_task_training: true               # keep HUMAN escalation + collection live
+  skill_label: "rl2_insert"              # phase log/TUI/phase.npy per skill
+  aux_skill_label: "rl1_grasp"           # ("SubRL loop: vla -> rl1_grasp" etc.)
+  vials_per_scene: 4                     # batch restage after 4 inserted vials
+  # Insert FAILURE routing (user 2026-07-31): fallen/slipped/no-new-vial ends the
+  # episode with reward 0 and returns to VLA (the multi-vial task continues; the
+  # human restages the WHOLE scene per-scene, or when the VLA idles this long
+  # because the remaining vials are fallen/unreachable):
+  approach_timeout_steps: 1800           # ~60 s of VLA with no sub-task entry -> Call-Human
+  human_reset_only: false
+  human_resume_to: "auto"                # inference resume -> VLA (whole-task restart)
+  use_vla_approach: true
+
+  phase_trigger:
+    _target_: limb.agents.dagger.FootPedalPhaseTrigger
+    device_path: "auto"
+    vendor_id: 0x3553
+    product_id: 0xb001
+    pause_resume_key: "KEY_A"
+    correction_key: "KEY_B"
+
+  reset_policy:                          # unreachable (no RESET edge at inference);
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_reset
+    table_z: 0.065                       # kept so the agent wires up
+    control: "ik_servo"
+    seed: null
+    step_rad: 0.01
+
+  escalator:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_escalator
+
+  collector:                             # PRIMARY (insert) episodes only — aux
+    _target_: limb.agents.policy_learning.subtask.rollout_collector.RolloutCollector
+    out_dir: "recordings/subtask_rl_insert_full"
+    save_frames_every: 6
+    push_url: "http://127.0.0.1:9102/extend"
+    episode_log_url: "http://127.0.0.1:9101/episode"
+
+  controlled_indices: [7, 8, 9, 10, 11, 12, 13]
+  left_mode: "vla"
+  chunk_len: 50
+
+  fk:
+    _target_: limb.agents.policy_learning.subtask.fk.EEPoseInjector
+    sides: ["right"]
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]

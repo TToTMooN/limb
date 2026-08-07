@@ -12,6 +12,7 @@ plumbing (intervention tagging, episode segmentation) lives in
 """
 
 from limb.agents.dagger.dagger_agent import DAggerAgent
+from limb.agents.dagger.pedal_pause_agent import PedalPausePolicyAgent
 from limb.agents.dagger.phase import DAggerEvents, DAggerPhase
 from limb.agents.dagger.phase_trigger import (
     FootPedalPhaseTrigger,
@@ -23,5 +24,6 @@ __all__ = [
     "DAggerEvents",
     "DAggerPhase",
     "FootPedalPhaseTrigger",
+    "PedalPausePolicyAgent",
     "PhaseTrigger",
 ]

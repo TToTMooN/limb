@@ -1,0 +1,227 @@
+# ============================================================================
+# SubRL FULL-TASK EVALUATION loop — STANDALONE (user rule 2026-07-27:
+# the training loop and the evaluation loop are DIFFERENT LOOPS and must
+# never share config files).
+#
+#   TRAINING  -> configs/yam_subtask_rl_grasp.yaml (+ configs/rl_collection.yaml)
+#   EVALUATION -> THIS FILE ONLY:
+#       uv run limb record --config-path configs/yam_subtask_rl_eval.yaml
+#
+# This file fully specifies the inference loop; nothing here is patched from the
+# training config, so training-side edits can never leak into eval (and vice
+# versa — the 2026-07-27 13:46 regression, where eval selector gates blocked
+# every training handoff, is the failure mode this separation prevents).
+#
+# Loop semantics (machine profile "inference"): VLA drives the FULL task
+# ("pick up all vials and place them in the stand"); the coding-agent SELECTOR
+# (CASCADE 2026-07-27: SAM3 primary lane same as training + Gemini-ER second
+# check for table-vs-stand — see the selector block below) hands
+# VLA -> RL at the grasp bottleneck; the proprio VERIFIER's success hands RL ->
+# VLA with the vial held; timeout/unrecoverable also return to VLA; NO HUMAN
+# phase (operator owns the scene, labels trials by keyboard: Space start/fail,
+# S success, D discard, Q quit); PAUSED resume always -> VLA.
+# RL service must run in EVAL mode:
+#   ~/venvs/sam3/bin/python ~/Desktop/research/SubRL-VLA/real_robot/services/subrl_rl_service.py \
+#       --port 9101 --device cuda --no-learner --no-wandb
+# Eval rollouts are NEVER pushed to any replay (collector push_url null) and the
+# actor runs DETERMINISTIC (mean action, no exploration noise).
+# ============================================================================
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 30.0
+sensors:
+  cameras:
+    head_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: '215122256240'
+    left_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: '409122274543'
+    right_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: '409122274017'
+robots:
+  left:
+  - robot_configs/yam/left.yaml
+  right:
+  - robot_configs/yam/left.yaml
+  - robot_configs/yam/right.yaml
+agent:
+  _target_: limb.agents.policy_learning.subtask.subtask_rl_agent.SubtaskRLAgent
+  vla:
+    _target_: limb.agents.policy_learning.policy_agent.YamPolicyAgent
+    client:
+      _target_: limb.agents.policy_learning.policy_client.OpenPIClient
+      host: 127.0.0.1
+      port: 8111
+    obs_transform:
+      _target_: limb.agents.policy_learning.transforms.OpenPIObsTransform
+      state_keys:
+      - left-joint_pos
+      - left-gripper_pos
+      - right-joint_pos
+      - right-gripper_pos
+      image_keys:
+        cam_high: head_camera-images-rgb
+        cam_left_wrist: left_wrist_camera-images-rgb
+        cam_right_wrist: right_wrist_camera-images-rgb
+      image_size:
+      - 224
+      - 224
+      prompt: pick up all vials and place them in the stand
+    action_transform:
+      _target_: limb.agents.policy_learning.transforms.ActionTransform
+      arm_names:
+      - left
+      - right
+      joints_per_arm: 7
+      include_vel: false
+      gripper_clip:
+      - 0.0
+      - 2.4
+    action_horizon: 50
+    smoothing_window: 4
+    async_inference: true
+    inference_interval_s: 1.2
+    expose_rl_features: true
+  rl_client:
+    _target_: limb.agents.policy_learning.subtask.rl_policy_client.RLPolicyClient
+    mode: http
+    url: http://127.0.0.1:9101/infer
+    action_dim: 7
+    deterministic: true
+  machine:
+    _target_: limb.agents.policy_learning.subtask.mode_machine.SubtaskModeMachine
+    profile: inference
+    min_mode_steps: 5
+    cooldown_steps: 5
+  phase_trigger:
+    _target_: limb.agents.dagger.FootPedalPhaseTrigger
+    device_path: auto
+    vendor_id: 13651
+    product_id: 45057
+    pause_resume_key: KEY_A
+    correction_key: KEY_B
+  verifiers:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_verifiers
+    table_z: 0.065
+    # Same success rule as training (2026-07-28): grasp + >=7.5 cm above grasp
+    # height sustained ~0.75 s — RL hands back to VLA only with a PROVEN stable hold.
+    stable_frames: 23
+    lift_m: 0.075
+    success_image_confirm: false
+    fallen_terminates: false
+    detector:
+      _target_: limb.agents.policy_learning.subtask.perception.make_vial_detector
+      backend: sam3
+      request_timeout_s: 30.0
+      throttle_s: 2.0
+  reset_policy:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_reset
+    table_z: 0.065
+    control: ik_servo
+    seed: null
+    step_rad: 0.01
+    detector:
+      _target_: limb.agents.policy_learning.subtask.perception.make_vial_detector
+      backend: sam3
+      request_timeout_s: 30.0
+      throttle_s: 2.0
+  # Selector VLA -> RL gate — one switch, two options, both LOCAL SAM3 (no VLM):
+  #
+  #   strict_wrist: true   EVAL gate ("proprio is not enough", 2026-07-28): the
+  #                        wrist camera itself must see a STANDING vial CENTERED
+  #                        under the gripper (center_frac 0.45) + stand-count
+  #                        block. Validated 6/6 on GT frames: 3 true entries
+  #                        PASS; fallen (off-center) / rack / bare table BLOCK.
+  #
+  #   strict_wrist: false  TRAINING gate — byte-identical to the RL-training
+  #                        boot-approach gate (yam_subtask_rl_grasp.yaml): any
+  #                        camera's cached SAM3 found confirms; no centering, no
+  #                        stand screen. Entries match the training entry gate
+  #                        exactly, but at FULL task this gate can false-fire on
+  #                        stand transit / retract moments (2026-07-14 runs).
+  #
+  # Blocks are logged either way ("[selector] proprio gates pass, entry BLOCKED
+  # by ..." — a quiet log means the arm never met the proprio gates).
+  selector:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_selector
+    table_z: 0.065
+    start_frames: 3
+    approach_z_min: 0.03
+    approach_z_max: 0.18
+    strict_wrist: false
+    detector:
+      _target_: limb.agents.policy_learning.subtask.perception.make_vial_detector
+      backend: sam3
+      request_timeout_s: 30.0
+      throttle_s: 2.0
+    # NO VLM at inference (user rule, re-affirmed 2026-07-28): VLMs are neither
+    # reliable on standing-vs-fallen nor latency-free — the entry path is pure
+    # LOCAL SAM3 geometry. Known residual gap: SAM3's mask catches only the
+    # vial's cap, so a CENTERED fallen vial can pass the gate and cost one
+    # rl_timeout episode (~10 s). At eval the OPERATOR owns that case: pedal-
+    # pause + re-stand the vial, or [D] discard the trial. The durable VLM-free
+    # fallen screen is the trained local selector head (design doc), revisited
+    # after all SubRL policies are trained.
+    # (Optional VLM veto lane still exists in code: confirm_veto + a topdown
+    # confirm_detector block — opt-in only, currently unused.)
+  use_vla_approach: true
+  human_reset_only: false
+  rl_timeout_steps: 300
+  escalator:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_escalator
+  collector:
+    _target_: limb.agents.policy_learning.subtask.rollout_collector.RolloutCollector
+    out_dir: recordings/subtask_rl_eval
+    save_frames_every: 6
+    push_url: null
+    episode_log_url: null
+  controlled_indices:
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  left_mode: vla
+  chunk_len: 50
+  fk:
+    _target_: limb.agents.policy_learning.subtask.fk.EEPoseInjector
+    sides:
+    - right
+station_metadata:
+  world_frame: left_arm
+  extrinsics:
+    right_arm_extrinsic:
+      position:
+      - 0.0
+      - -0.61
+      - 0.0
+      rotation:
+      - 1.0
+      - 0.0
+      - 0.0
+      - 0.0
+collection:
+  _target_: limb.recording.dagger_session.DAggerCollectionSession
+  num_episodes: 20
+  task_instruction: 'Pick up all vials and place them in the stand.'
+  episode_duration_s: 120.0
+  trigger:
+    _target_: limb.recording.trigger.KeyboardTrigger
+  recorder:
+    _target_: limb.recording.episode_recorder.EpisodeRecorder
+    base_dir: recordings
+    recording_fps: 30
+    video_codec: libx264
+    ee_frame_names:
+      left: ee_link
+      right: ee_link

@@ -1,5 +1,5 @@
 _target_: limb.envs.launch.LaunchConfig
-hz: 100.0
+hz: 60.0
 
 sensors:
   cameras:
@@ -33,6 +33,11 @@ agent:
   joint_signs_left: [1, 1, -1, -1, -1, 1]
   joint_signs_right: [1, 1, -1, -1, -1, 1]
   joycon_gripper: true
+  # Pin the exact Joy-Con units (Bluetooth MACs) for this station — a spare
+  # left Joy-Con (60:6B:FF:CD:0D:41) is also paired to this host and was
+  # winning first-match binding, silently eating left-gripper input.
+  joycon_left_mac: "E0:EF:BF:8A:82:E0"
+  joycon_right_mac: "E0:EF:BF:8B:00:40"
   default_gripper_value: 0.0
 
 station_metadata:
