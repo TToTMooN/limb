@@ -1,0 +1,48 @@
+# Online-RL episode recording overlay for the SubRL loop (analog of
+# dagger_collection.yaml, but for the autonomous RL <-> RESET <-> HUMAN cycle).
+#
+# Every frame is stamped with the CURRENT LOOP MODE (from SubtaskRLAgent.phase_name(),
+# same plumbing DAgger uses) into phase.npy:
+#
+#     vla     - the session's one-time first approach (boot only)
+#     rl      - RL ROLLOUTS (frozen pi0.5 + right-arm residual)  <-- the important one
+#     reset   - coding-agent auto-reset (place the vial back, retract above it)
+#     human   - Call-Human (scene being restored)
+#
+# Filtering at analysis/training time is a one-liner:
+#     df[df.phase == 'rl']          # only the RL rollout timesteps
+#     df[df.phase == 'reset']       # auto-reset behavior (for reset QA/calibration)
+#
+# Lifecycle: HANDS-FREE (no trigger). The session auto-starts with the loop and
+# rotates to a new episode file every `episode_duration_s`, each saved immediately —
+# no operator interaction, matching an autonomous training run. One recorded
+# "episode" file therefore spans several RL<->RESET cycles; the phase column (plus
+# the RolloutCollector's own per-RL-episode journal in recordings/subtask_rl_grasp/)
+# is what separates them.
+#
+# Usage:
+#   uv run limb record \
+#     --config-path configs/yam_subtask_rl_grasp.yaml configs/rl_collection.yaml
+#
+# Stops after `num_episodes` files or Ctrl+C.
+
+collection:
+  _target_: limb.recording.dagger_session.DAggerCollectionSession
+  num_episodes: 200
+  task_instruction: "Pick up all vials and place them in the stand"
+  # Rotation cap = file granularity. 120 s @30 Hz ~ 3600 frames ~ 4-8 RL<->RESET
+  # cycles per file — small enough to inspect/discard individually, large enough
+  # to keep file overhead negligible over an hours-long training run.
+  episode_duration_s: 1800.0
+  # NO trigger: hands-free auto-start + auto-rotation (each file saved as success).
+  # Add a KeyboardTrigger here only if you want operator-labeled segments instead.
+  recorder:
+    _target_: limb.recording.episode_recorder.EpisodeRecorder
+    base_dir: "recordings"
+    recording_fps: 30
+    # CPU encoder: with pi0.5 serve + SAM3 on the GPU there is no VRAM left for
+    # NVENC — the 22:47 run's videos all saved empty ("hevc_nvenc: out of memory").
+    video_codec: "libx264" 
+    ee_frame_names:
+      left: "ee_link"
+      right: "ee_link"

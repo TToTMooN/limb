@@ -28,11 +28,19 @@ JOYCON_VENDOR_ID = 0x057E
 RECONNECT_INTERVAL = 2.0
 
 
-def _find_joycon(side: str) -> "Optional[str]":
-    """Return the evdev device path for the requested Joy-Con side, or None."""
+def _find_joycon(side: str, uniq: Optional[str] = None) -> "Optional[str]":
+    """Return the evdev device path for the requested Joy-Con side, or None.
+
+    ``uniq`` pins the search to one physical unit's Bluetooth MAC (as reported
+    by ``InputDevice.uniq``).  Without it, when several Joy-Cons of the same
+    side are paired to the host (e.g. a spare that auto-reconnected), the
+    first match wins — which may be the wrong physical unit, silently eating
+    the operator's gripper input.  We warn in that case.
+    """
     from evdev import InputDevice, list_devices
 
     target_product = LEFT_JOYCON_PRODUCT_ID if side == "left" else RIGHT_JOYCON_PRODUCT_ID
+    matches = []
     for path in list_devices():
         try:
             dev = InputDevice(path)
@@ -43,10 +51,26 @@ def _find_joycon(side: str) -> "Optional[str]":
                 and "imu" not in name
                 and "motion" not in name
             ):
-                return path
+                matches.append((path, dev.uniq))
         except Exception:
             continue
-    return None
+    if not matches:
+        return None
+    if uniq is not None:
+        for path, dev_uniq in matches:
+            if dev_uniq and dev_uniq.lower() == uniq.lower():
+                return path
+        return None  # pinned unit not connected — treat as absent
+    if len(matches) > 1:
+        listing = ", ".join(f"{p} (MAC {u})" for p, u in matches)
+        logger.warning(
+            "Multiple %s Joy-Cons connected: %s — binding to the first, which may be the wrong "
+            "physical unit. Disconnect the spare or pin the right one via %s_mac.",
+            side,
+            listing,
+            side,
+        )
+    return matches[0][0]
 
 
 class JoyConGripperReader:
@@ -62,6 +86,12 @@ class JoyConGripperReader:
         Gripper velocity (units/s) at full stick deflection.
     deadzone : float
         Stick axis values below this threshold are treated as zero.
+    left_mac : str | None
+        Bluetooth MAC (``InputDevice.uniq``) of the left Joy-Con to bind to.
+        Pin this when spare Joy-Cons may be paired to the host — otherwise
+        the first enumerated unit wins, which can be the wrong one.
+    right_mac : str | None
+        Same for the right Joy-Con.
     """
 
     def __init__(
@@ -71,6 +101,8 @@ class JoyConGripperReader:
         stick_speed: float = 3.0,
         deadzone: float = 0.05,
         proportional: bool = True,
+        left_mac: Optional[str] = None,
+        right_mac: Optional[str] = None,
     ) -> None:
         self._open = gripper_open
         self._close = gripper_close
@@ -79,6 +111,8 @@ class JoyConGripperReader:
         self._stick_speed = stick_speed
         self._deadzone = deadzone
         self._proportional = proportional
+        self._left_mac = left_mac
+        self._right_mac = right_mac
 
         self._lock = threading.Lock()
         self._left_gripper = gripper_open
@@ -129,10 +163,17 @@ class JoyConGripperReader:
             axis_code = ecodes.ABS_RY
             toggle_code = ecodes.BTN_TR2  # ZR
 
+        pinned_mac = self._left_mac if side == "left" else self._right_mac
+
         while not self._stop.is_set():
-            path = _find_joycon(side)
+            path = _find_joycon(side, uniq=pinned_mac)
             if path is None:
-                logger.debug("Joy-Con %s not found, retrying in %.0fs…", side, RECONNECT_INTERVAL)
+                logger.debug(
+                    "Joy-Con %s not found%s, retrying in %.0fs…",
+                    side,
+                    f" (pinned to {pinned_mac})" if pinned_mac else "",
+                    RECONNECT_INTERVAL,
+                )
                 self._stop.wait(RECONNECT_INTERVAL)
                 continue
 

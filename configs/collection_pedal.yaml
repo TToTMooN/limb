@@ -13,9 +13,10 @@ enable_monitor: false
 
 collection:
   _target_: limb.recording.session.DataCollectionSession
-  num_episodes: 25
-  task_instruction: "place the vial into the stand"
+  num_episodes: 200
+  task_instruction: "Pick up all vials and place them in the stand."
   countdown_s: 0
+  default_success: true  # pedal stop/save marks episodes as success by default
   recorder:
     _target_: limb.recording.episode_recorder.EpisodeRecorder
     base_dir: "recordings"

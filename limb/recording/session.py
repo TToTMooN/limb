@@ -59,6 +59,10 @@ class DataCollectionSession:
         Language instruction stored in metadata (for VLA training data).
     countdown_s : float
         Seconds to wait before recording starts after START_STOP signal.
+    default_success : bool
+        Success label applied when an episode is saved via the START_STOP
+        toggle (e.g. the foot pedal) without an explicit SUCCESS signal.
+        The SUCCESS signal (keyboard ``s``) always marks success regardless.
 
     Usage in control loop::
 
@@ -75,6 +79,7 @@ class DataCollectionSession:
     num_episodes: int = 10
     task_instruction: str = ""
     countdown_s: float = 3.0
+    default_success: bool = False
 
     display: object = None  # StatusDisplay, set programmatically (not from config)
 
@@ -158,7 +163,7 @@ class DataCollectionSession:
 
         if signal == TriggerSignal.START_STOP:
             if self.recorder.is_recording:
-                self._finish_episode(success=False)
+                self._finish_episode(success=self.default_success)
             else:
                 self._start_countdown()
 
@@ -176,7 +181,7 @@ class DataCollectionSession:
 
         elif signal == TriggerSignal.QUIT:
             if self.recorder.is_recording:
-                self._finish_episode(success=False)
+                self._finish_episode(success=self.default_success)
             self._done = True
             self._print_summary()
             return False
@@ -308,7 +313,7 @@ class DataCollectionSession:
     def close(self) -> None:
         """Clean up: save any in-progress episode, close trigger."""
         if self.recorder.is_recording:
-            self._finish_episode(success=False)
+            self._finish_episode(success=self.default_success)
         self._print_summary()
         self.trigger.close()
         self.recorder.close()

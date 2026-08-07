@@ -2,5 +2,5 @@ motor_chain:
   # channel: "can_right"
   channel: "can_follow_r"
   motor_chain_name: "yam_right"
-gripper_limits: [0.0, -5.2]
+gripper_limits: [6.30, 1.00] # follower-right (can_follow_r) measured range; overrides left.yaml's [1.14, 6.40] base.
 limit_gripper_force: 10.0

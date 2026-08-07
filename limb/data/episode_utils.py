@@ -172,3 +172,91 @@ def compute_stats(all_states: List[np.ndarray], all_actions: List[np.ndarray]) -
         }
 
     return stats
+
+
+# ---------------------------------------------------------------------------
+# PiStar / pi0.6 RECAP helpers.
+#
+# These produce the five per-frame columns pistar expects in a LeRobot
+# dataset (`intervention`, `reward`, `reward_label`, `value_label`, `adv_ind`).
+# Formulas mirror ybpy/pistar `examples/libero/pistar_rlds_demo_processing.py`
+# so any pistar-shaped consumer (train_value.py / label_advantage_from_vlm.py /
+# train.py with `pistar=True`) ingests limb data without surprise.
+#
+# DAgger frame mapping:
+#   phase == "correcting"  -> intervention = 1 (operator-driven, demo-shaped)
+#   phase in (autonomous, paused) -> intervention = 0 (rollout-shaped;
+#                                    adv_ind gets rewritten by VLM later)
+# ---------------------------------------------------------------------------
+
+
+def episode_success(episode_dir: Path) -> bool:
+    """SUCCESS / FAILURE marker → bool. Missing marker treated as failure."""
+    return (episode_dir / "SUCCESS").exists()
+
+
+def compute_pistar_intervention(
+    phase: np.ndarray | None,
+    interventions: np.ndarray | None,
+    n_steps: int,
+) -> np.ndarray:
+    """1 where the operator was driving (CORRECTING phase), 0 elsewhere.
+
+    Prefers ``phase.npy`` ("correcting" / "autonomous" / "paused") when
+    available — it carries the DAgger state directly. Falls back to
+    ``interventions.npy`` (bool) when only that is present, and to all
+    zeros for non-DAgger episodes.
+    """
+    if phase is not None and len(phase) >= n_steps:
+        phase_arr = np.asarray(phase[:n_steps])
+        return (phase_arr == "correcting").astype(np.int64)
+    if interventions is not None and len(interventions) >= n_steps:
+        return np.asarray(interventions[:n_steps], dtype=np.int64)
+    return np.zeros(n_steps, dtype=np.int64)
+
+
+def compute_pistar_reward(n_steps: int, success: bool) -> np.ndarray:
+    """Sparse success reward: 1.0 at the last frame iff success, else 0.0."""
+    r = np.zeros(n_steps, dtype=np.float32)
+    if success and n_steps > 0:
+        r[-1] = 1.0
+    return r
+
+
+def compute_pistar_reward_label(n_steps: int) -> np.ndarray:
+    """Per-step reward used by the VLM advantage step.
+
+    Same formula regardless of episode outcome (matches the demo conv):
+        reward_label = -1 / T  for non-terminal frames
+        reward_label =  0      at the last frame
+    """
+    if n_steps <= 0:
+        return np.zeros(0, dtype=np.float32)
+    rl = np.full(n_steps, -1.0 / float(n_steps), dtype=np.float32)
+    rl[-1] = 0.0
+    return rl
+
+
+def compute_pistar_value_label(n_steps: int, success: bool) -> np.ndarray:
+    """Initial training target for the VLM value model.
+
+    Success → linear ramp ``-(T-1-t)/T`` (≈ -1 at the start, 0 at terminal),
+    mirroring the demo-success schedule in pistar's conversion script.
+    Failure → constant ``-1.0`` (stays far from the goal; the VLM refines).
+    """
+    if n_steps <= 0:
+        return np.zeros(0, dtype=np.float32)
+    if success:
+        t = np.arange(n_steps, dtype=np.float32)
+        return (-(n_steps - 1 - t) / float(n_steps)).astype(np.float32)
+    return np.full(n_steps, -1.0, dtype=np.float32)
+
+
+def compute_pistar_adv_ind(intervention: np.ndarray) -> List[str]:
+    """Initial advantage-conditioning label per frame.
+
+    Demo-shaped (``intervention == 1``) → ``"positive"``.
+    Rollout-shaped (``intervention == 0``) → ``"none"``; will be rewritten
+    by pistar's ``label_advantage_from_vlm.py`` at training time.
+    """
+    return ["positive" if int(v) == 1 else "none" for v in intervention]

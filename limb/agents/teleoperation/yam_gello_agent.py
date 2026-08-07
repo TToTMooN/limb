@@ -31,6 +31,7 @@ Launch via YAML config::
 """
 
 import logging
+import time
 from typing import Any, Dict, Optional, Sequence, Union
 
 import numpy as np
@@ -100,9 +101,22 @@ class YamGelloAgent(Agent):
     joycon_gripper_proportional : bool
         If True (default), the Joy-Con stick controls gripper velocity
         proportionally.  If False, only the binary ZL/ZR toggle is active.
+    joycon_left_mac : str | None
+        Bluetooth MAC of the left Joy-Con to bind to.  Pin this when spare
+        Joy-Cons may be paired to the host — otherwise the first enumerated
+        unit wins, which can silently be the wrong physical device.
+    joycon_right_mac : str | None
+        Same for the right Joy-Con.
     default_gripper_value : float
         Gripper position sent every step when *joycon_gripper* is False
         (0.0 = open).
+    rejoin_gap_s : float
+        A leader-data outage longer than this (seconds) triggers smooth
+        rejoin when fresh data resumes, instead of snapping the followers to
+        wherever the leader has moved in the meantime.  Network mode only.
+    rejoin_blend_s : float
+        Duration (seconds) of the linear blend from the last commanded arm
+        pose to the live leader pose after an outage.
     """
 
     use_joint_state_as_action: bool = False
@@ -120,7 +134,11 @@ class YamGelloAgent(Agent):
         joint_signs_right: Sequence[int] = (1, 1, -1, -1, -1, 1),
         joycon_gripper: bool = False,
         joycon_gripper_proportional: bool = True,
+        joycon_left_mac: Optional[str] = None,
+        joycon_right_mac: Optional[str] = None,
         default_gripper_value: float = 0.0,
+        rejoin_gap_s: float = 1.0,
+        rejoin_blend_s: float = 1.5,
     ) -> None:
         self.bimanual = bimanual
         self._default_gripper = default_gripper_value
@@ -128,14 +146,31 @@ class YamGelloAgent(Agent):
         self._signs_left = np.asarray(joint_signs_left, dtype=np.float64)
         self._signs_right = np.asarray(joint_signs_right, dtype=np.float64)
 
+        # Smooth-rejoin state: after a leader-data outage (server restart, DLP
+        # tc churn on the robot link), the leader may have moved while the
+        # followers held pose — blend back instead of snapping.
+        self._rejoin_gap_s = rejoin_gap_s
+        self._rejoin_blend_s = rejoin_blend_s
+        self._in_gap = False
+        self._blend_start = 0.0
+        self._blend_until = 0.0
+        self._blend_from: Dict[str, np.ndarray] = {}
+        self._last_arms: Dict[str, np.ndarray] = {}
+
         self._gripper_reader: Optional["JoyConGripperReader"] = None
         if joycon_gripper:
             from limb.devices.joycon_gripper_reader import JoyConGripperReader
 
-            self._gripper_reader = JoyConGripperReader(proportional=joycon_gripper_proportional)
+            self._gripper_reader = JoyConGripperReader(
+                proportional=joycon_gripper_proportional,
+                left_mac=joycon_left_mac,
+                right_mac=joycon_right_mac,
+            )
             logger.info(
-                "Joy-Con gripper control enabled (proportional=%s)",
+                "Joy-Con gripper control enabled (proportional=%s, left_mac=%s, right_mac=%s)",
                 joycon_gripper_proportional,
+                joycon_left_mac,
+                joycon_right_mac,
             )
 
         self._n_left = len(left_motor_ids)
@@ -168,8 +203,42 @@ class YamGelloAgent(Agent):
                 f", right_ids={list(right_motor_ids)}" if bimanual else "",
             )
 
+    def _update_rejoin_state(self) -> float:
+        """Track leader-data outages; return current blend alpha in [0, 1].
+
+        1.0 means "use the live leader pose as-is" (no blending active).
+        """
+        now = time.monotonic()
+        age_fn = getattr(self._reader, "seconds_since_data", None)
+        if age_fn is None:  # USB reader: no outage concept
+            return 1.0
+        if age_fn() > self._rejoin_gap_s:
+            self._in_gap = True
+        elif self._in_gap:
+            # Fresh data after an outage — blend from the last commanded pose.
+            self._in_gap = False
+            if self._last_arms:
+                logger.warning(
+                    "Leader data resumed after outage — blending to live pose over %.1fs",
+                    self._rejoin_blend_s,
+                )
+                self._blend_from = {k: v.copy() for k, v in self._last_arms.items()}
+                self._blend_start = now
+                self._blend_until = now + self._rejoin_blend_s
+        if now < self._blend_until:
+            return (now - self._blend_start) / self._rejoin_blend_s
+        return 1.0
+
+    def _arm_target(self, side: str, clamped: np.ndarray, alpha: float) -> np.ndarray:
+        """Apply rejoin blending for one arm and remember the commanded pose."""
+        if alpha < 1.0 and side in self._blend_from:
+            clamped = (1.0 - alpha) * self._blend_from[side] + alpha * clamped
+        self._last_arms[side] = clamped
+        return clamped
+
     def act(self, obs: Dict[str, Any]) -> Dict[str, Dict[str, np.ndarray]]:
         leader_pos = self._reader.get_joint_positions()
+        alpha = self._update_rejoin_state()
 
         if self._gripper_reader is not None:
             grip_left, grip_right = self._gripper_reader.get_gripper_values()
@@ -180,10 +249,11 @@ class YamGelloAgent(Agent):
         if self._network_mode:
             left_joints = left_joints * self._signs_left
         left_clamped = np.clip(left_joints, self._joint_limits[:, 0], self._joint_limits[:, 1])
+        left_target = self._arm_target("left", left_clamped, alpha)
 
         action: Dict[str, Dict[str, np.ndarray]] = {
             "left": {
-                "pos": np.concatenate([left_clamped, [grip_left]]),
+                "pos": np.concatenate([left_target, [grip_left]]),
             }
         }
 
@@ -192,8 +262,9 @@ class YamGelloAgent(Agent):
             if self._network_mode:
                 right_joints = right_joints * self._signs_right
             right_clamped = np.clip(right_joints, self._joint_limits[:, 0], self._joint_limits[:, 1])
+            right_target = self._arm_target("right", right_clamped, alpha)
             action["right"] = {
-                "pos": np.concatenate([right_clamped, [grip_right]]),
+                "pos": np.concatenate([right_target, [grip_right]]),
             }
 
         return action

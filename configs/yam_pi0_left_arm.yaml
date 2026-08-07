@@ -1,0 +1,58 @@
+# OpenPI policy server client for a SINGLE-ARM (left-arm-only) pi0.5 finetune
+# (served via openpi/scripts/serve_policy.py with config pi05_yam_single_arm).
+# Default targets a local server at 8111. Change `host` if remote.
+#
+# Single left arm + head_camera + left_wrist_camera (no right wrist).
+
+_target_: limb.envs.launch.LaunchConfig
+# Match the dataset fps the policy was trained on (YAM datasets are 30 fps).
+hz: 60.0
+
+sensors:
+  cameras:
+    head_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "215122256240"
+    left_wrist_camera:
+        _target_: limb.sensors.cameras.camera.CameraNode
+        camera:
+            _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+            serial_number: "409122274543"
+
+robots:
+  left: ["robot_configs/yam/left.yaml"]
+
+agent:
+  _target_: limb.agents.policy_learning.policy_agent.YamPolicyAgent
+  client:
+    _target_: limb.agents.policy_learning.policy_client.OpenPIClient
+    host: "0.0.0.0"
+    port: 8111
+  obs_transform:
+    _target_: limb.agents.policy_learning.transforms.OpenPIObsTransform
+    # 7-D state: 6 left-arm joints + 1 left gripper.
+    state_keys:
+      - "left-joint_pos"
+      - "left-gripper_pos"
+    # AlohaInputs expects cam_high / cam_left_wrist; the server fills the missing
+    # cam_right_wrist with a black image (image_mask=False) automatically.
+    image_keys:
+      cam_high: "head_camera-images-rgb"
+      cam_left_wrist: "left_wrist_camera-images-rgb"
+    image_size: [224, 224]
+    prompt: "Grasp the vial, and insert it into the stand."   # required for VLAs
+  action_transform:
+    _target_: limb.agents.policy_learning.transforms.ActionTransform
+    arm_names: ["left"]
+    joints_per_arm: 7
+    include_vel: false
+    # YAM gripper position spans [0, 2.4] (see meta/stats.json action.min/max).
+    gripper_clip: [0.0, 2.4]
+  action_horizon: 50    # pi0.5 default action_horizon
+  smoothing_window: 4
+  async_inference: false
+
+station_metadata:
+  world_frame: "left_arm"

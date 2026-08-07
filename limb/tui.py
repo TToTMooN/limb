@@ -172,6 +172,12 @@ class StatusDisplay:
                 "AUTONOMOUS": "cyan",
                 "PAUSED": "yellow",
                 "CORRECTING": "magenta",
+                # SubRL online-RL loop modes (SubtaskRLAgent.phase_name)
+                "RL": "cyan",          # RL rollout: pi0.5 + residual driving
+                "RESET": "green",      # coding-agent auto-reset (EAP place-back / staging)
+                "HUMAN": "red",        # Call-Human: scene needs restoring
+                "VLA": "cyan",
+                "TERMINAL": "white",
             }.get(phase_label, "white")
             lines.append("phase: ", style="dim")
             lines.append(phase_label, style=f"bold {color}")

@@ -128,6 +128,11 @@ class OpenPIObsTransform:
     prompt : str or None
         Language instruction sent under the "prompt" key on every observation.
         Required for VLA models (pi0, pi0.5, X-VLA, SmolVLA).
+    adv_ind : str or None
+        Advantage-conditioning token sent under the "adv_ind" key on every
+        observation. Required for pistar / pi0.6 RECAP models (otherwise the
+        server's TokenizePrompt raises "Adv_ind is required."). Standard
+        serving-time value is "positive". Leave None for vanilla pi0 / pi0.5.
     """
 
     state_keys: List[str] = field(
@@ -147,6 +152,7 @@ class OpenPIObsTransform:
     )
     image_size: Tuple[int, int] = (224, 224)
     prompt: Optional[str] = None
+    adv_ind: Optional[str] = None
 
     def __call__(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         flat = _recursive_flatten(obs)
@@ -170,6 +176,8 @@ class OpenPIObsTransform:
         result: Dict[str, Any] = {"state": state, "images": images}
         if self.prompt is not None:
             result["prompt"] = self.prompt
+        if self.adv_ind is not None:
+            result["adv_ind"] = self.adv_ind
         return result
 
 

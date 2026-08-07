@@ -56,15 +56,23 @@ class YamPolicyAgent(PolicyAgent):
     async_inference: bool = True
     inference_interval_s: Optional[float] = None
     use_joint_state_as_action: bool = False
+    # SubRL: expose the RLT features to a wrapping SubtaskRLAgent — z_rl (pi0.5 image
+    # embedding, needs the serve run with SUBRL_RETURN_EMBED=1) + the reference action
+    # chunk. Added to act()'s output as "_z_rl" / "_ref_chunk". Off by default.
+    expose_rl_features: bool = False
 
     def __post_init__(self) -> None:
         self._chunk_mgr = ActionChunkManager(
             action_horizon=self.action_horizon,
             smoothing_window=self.smoothing_window,
         )
+        self._last_embed: Optional[np.ndarray] = None    # z_rl
+        self._last_chunk: Optional[np.ndarray] = None     # ref_chunk (horizon, action_dim)
         self._obs_lock = threading.Lock()
         self._latest_obs: Optional[Dict[str, Any]] = None
         self._step_counter = 0
+        self._starved = False                             # freeze-guard state (see act())
+        self._last_flat_action: Optional[np.ndarray] = None
         # Bumped on every reset() so in-flight async inferences whose request
         # predates the reset can be detected and discarded instead of
         # repopulating the buffer with pre-takeover actions.
@@ -105,6 +113,8 @@ class YamPolicyAgent(PolicyAgent):
             try:
                 result = self.client.infer(obs)
                 actions = result["actions"]  # (horizon, action_dim)
+                if self.expose_rl_features:
+                    self._capture_features(result)
             except Exception as e:
                 logger.warning("Inference failed: {}", e)
                 time.sleep(0.1)
@@ -139,18 +149,70 @@ class YamPolicyAgent(PolicyAgent):
                 self._latest_obs = transformed_obs
                 self._step_counter += 1
 
-            while not self._chunk_mgr.has_actions:
+            # FREEZE GUARD (on-robot freeze 2026-07-08 18:08): this wait used to be
+            # unbounded — when the serve's websocket died the buffer never refilled and
+            # the whole control loop hung here forever (robot holding, TUI frozen, no
+            # pedals). Bounded wait: HOLD the last commanded action while the inference
+            # thread reconnects. First starvation waits 5 s; subsequent ticks 0.25 s so
+            # the loop stays responsive through an outage.
+            deadline = time.monotonic() + (0.25 if self._starved else 5.0)
+            while not self._chunk_mgr.has_actions and time.monotonic() < deadline:
                 time.sleep(0.01)
 
-            flat_action = self._chunk_mgr.get_action()
+            if self._chunk_mgr.has_actions:
+                if self._starved:
+                    logger.info("Action chunks flowing again — resuming policy control")
+                self._starved = False
+                flat_action = self._chunk_mgr.get_action()
+                self._last_flat_action = flat_action
+            elif self._last_flat_action is not None:
+                if not self._starved:
+                    logger.error(
+                        "No action chunk after 5 s (policy server down?) — HOLDING the "
+                        "last commanded action until inference recovers")
+                self._starved = True
+                flat_action = self._last_flat_action
+            else:
+                # Startup only: nothing has been commanded yet, so there is no pose to
+                # hold — the original unbounded wait is the safe behavior here.
+                while not self._chunk_mgr.has_actions:
+                    time.sleep(0.01)
+                flat_action = self._chunk_mgr.get_action()
+                self._last_flat_action = flat_action
         else:
             # Sync: block on inference, then buffer
             if not self._chunk_mgr.has_actions or self._chunk_mgr.remaining == 0:
                 result = self.client.infer(transformed_obs)
+                if self.expose_rl_features:
+                    self._capture_features(result)
                 self._chunk_mgr.update(result["actions"])
             flat_action = self._chunk_mgr.get_action()
 
-        return self.action_transform(flat_action)
+        action = self.action_transform(flat_action)
+        if self.expose_rl_features:
+            action["_z_rl"] = self._last_embed                 # (2048,) or None
+            action["_ref_chunk"] = self._last_chunk            # (horizon, action_dim) or None
+            # Execution cursor into _ref_chunk: index of the action just returned. Lets the
+            # RL side slice an ALIGNED reference window (review H10). remaining counts the
+            # actions still buffered AFTER this one.
+            try:
+                action["_ref_cursor"] = max(0, self.action_horizon - self._chunk_mgr.remaining - 1)
+            except Exception:
+                action["_ref_cursor"] = 0
+        return action
+
+    def _capture_features(self, result: Dict[str, Any]) -> None:
+        emb = result.get("image_embedding")
+        if emb is None and not getattr(self, "_warned_no_embed", False):
+            # review M22: silently-null z_rl poisons the replay for hours before anyone
+            # notices — the serve must run with SUBRL_RETURN_EMBED=1.
+            self._warned_no_embed = True
+            logger.warning(
+                "expose_rl_features=True but the policy server returned no 'image_embedding' "
+                "(launch it with SUBRL_RETURN_EMBED=1) — z_rl will be None and RL transitions "
+                "will be degraded")
+        self._last_embed = None if emb is None else np.asarray(emb, np.float32)
+        self._last_chunk = np.asarray(result["actions"], np.float32)
 
     @remote()
     def reset(self) -> None:

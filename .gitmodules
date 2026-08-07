@@ -2,3 +2,6 @@
 	path = dependencies/i2rt
 	url = https://github.com/i2rt-robotics/i2rt.git
 	commit = cbe48976b44aae45af856c62545be00ea2feed11
+[submodule "pistar"]
+	path = pistar
+	url = https://github.com/Destiny000621/RECAP.git

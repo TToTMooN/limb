@@ -16,3 +16,5 @@ recordings/
 datasets/
 logs/
 *.code-workspace
+# Nested git clone of openpi dependency (large, excluded)
+openpi/

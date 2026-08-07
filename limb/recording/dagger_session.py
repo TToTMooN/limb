@@ -50,6 +50,7 @@ from loguru import logger
 
 from limb.core.observation import Observation
 from limb.recording.episode_recorder import EpisodeRecorder
+from limb.recording.trigger import TriggerSignal
 from limb.tui import SessionState
 
 
@@ -79,6 +80,26 @@ class DAggerCollectionSession:
         Corrections-only mode only: discard correction windows that
         finish in fewer than this many ticks (likely accidental pedal
         taps).  Default 5.
+    trigger : TriggerSource | None
+        Optional session-level trigger (e.g. ``KeyboardTrigger``) that
+        controls episode start/stop independently of the DAgger pedal
+        phase trigger.  When set:
+          * the first episode does NOT auto-start — operator must send
+            ``START_STOP`` (e.g. press ``SPACE``) to begin episode 1;
+          * ``SUCCESS`` while recording  → save episode with ``SUCCESS``
+            marker, then wait between episodes for next ``START_STOP``;
+          * ``START_STOP`` while recording → save with ``FAILURE``
+            marker (policy didn't complete the task), then wait;
+          * ``DISCARD`` while recording → throw away the episode, then
+            wait;
+          * ``QUIT`` → end the session.
+          * ``episode_duration_s`` still rotates as a safety cap; on
+            timeout the episode is saved as FAILURE and the session
+            enters the wait state (operator must press START_STOP for
+            the next episode).
+        When ``trigger=None`` (default), the legacy time-only rotation
+        behaviour is preserved: the first episode auto-starts and each
+        rotation auto-starts the next episode marked as success.
     """
 
     recorder: Any = field(default_factory=EpisodeRecorder)
@@ -94,6 +115,7 @@ class DAggerCollectionSession:
     record_autonomous: bool = True
     episode_duration_s: float = 300.0
     min_correction_steps: int = 0
+    trigger: Any = None
 
     display: object = None  # StatusDisplay, set by launch.py at runtime
 
@@ -111,6 +133,12 @@ class DAggerCollectionSession:
         self._episode_step_count = 0
         self._episode_intervention_count = 0
         self._latest_phase: Optional[str] = None
+
+        # True when an episode has just finished and we're waiting for the
+        # operator to reset the scene + press START_STOP to begin the next one.
+        # Only used when ``trigger`` is set; in legacy time-only mode this
+        # stays False forever (auto-rotation keeps the recorder live).
+        self._between_episodes = False
 
         # Move the recorder into a per-session subdirectory so episodes
         # land neatly under base_dir/<task>_<ts>/.
@@ -134,9 +162,18 @@ class DAggerCollectionSession:
             self.task_instruction or "(none)",
         )
 
-        # Start the first episode immediately so we don't miss frames while
-        # waiting for the first phase transition.
-        self._start_episode()
+        if self.trigger is None:
+            # Legacy path: auto-start the first episode so we don't miss
+            # frames while waiting for the first phase transition.
+            self._start_episode()
+        else:
+            # Operator-controlled lifecycle. Wait for the first START_STOP
+            # so the operator can stage the scene before recording begins.
+            self._between_episodes = True
+            logger.info(
+                "Press SPACE / Enter (START_STOP) to begin episode 1.  "
+                "[S] success+save  [SPACE] failure+save / start next  [D] discard  [Q] quit"
+            )
 
     # ------------------------------------------------------------------ #
     #  Public API                                                        #
@@ -167,6 +204,46 @@ class DAggerCollectionSession:
             return False
         self._latest_phase = phase
 
+        # ---- Session-level trigger (operator lifecycle control) ----
+        if self.trigger is not None:
+            signal = self.trigger.get_signal()
+            if signal == TriggerSignal.SUCCESS:
+                if self.recorder.is_recording:
+                    self._finish_episode(success=True)
+                    self._between_episodes = True
+                    logger.info("Episode marked SUCCESS. Reset the scene; press SPACE for the next episode.")
+                else:
+                    logger.warning("Not recording — nothing to mark as success.")
+            elif signal == TriggerSignal.START_STOP:
+                if self.recorder.is_recording:
+                    # Stop early because the policy didn't finish the task.
+                    self._finish_episode(success=False)
+                    self._between_episodes = True
+                    logger.info("Episode marked FAILURE. Reset the scene; press SPACE for the next episode.")
+                else:
+                    self._between_episodes = False
+                    self._start_episode()
+            elif signal == TriggerSignal.DISCARD:
+                if self.recorder.is_recording:
+                    self._discard_episode()
+                    self._between_episodes = True
+                    logger.info("Episode discarded. Press SPACE to start the next one.")
+                else:
+                    logger.warning("Not recording — nothing to discard.")
+            elif signal == TriggerSignal.QUIT:
+                if self.recorder.is_recording:
+                    self._finish_episode(success=False)
+                self._done = True
+                self._print_summary()
+                return False
+
+        # While between episodes the recorder stays idle; the control loop
+        # keeps ticking so the agent (and DAgger pedals) remain live.
+        if self._between_episodes:
+            self._prev_intervention = intervention
+            self._push_tui_state(intervention=intervention)
+            return True
+
         # Single recording path: always-continuous (sentry-style). Corrections
         # are labeled per-frame via the recorder's phase metadata so any
         # downstream filter can recover the corrections-only subset.
@@ -177,19 +254,30 @@ class DAggerCollectionSession:
 
         if self.num_episodes > 0 and self.episodes_completed >= self.num_episodes:
             self._done = True
-            # Make sure we finish whatever is in flight (sentry).
+            # Defensive flush of anything still in flight. In trigger mode
+            # this is almost always already saved; in legacy mode it captures
+            # the final rotation. Default to FAILURE so an unmarked flush
+            # never silently claims success.
             if self.recorder.is_recording:
-                self._finish_episode(success=True)
+                self._finish_episode(success=False)
             self._print_summary()
             return False
         return True
 
     def close(self) -> None:
         # Flush any in-progress episode so we don't leak data on shutdown.
+        # Default to FAILURE: a shutdown mid-episode means the operator
+        # never got to label it, and silently claiming success would
+        # poison training data.
         if self.recorder.is_recording:
-            self._finish_episode(success=True)
+            self._finish_episode(success=False)
         if not self._done:
             self._print_summary()
+        if self.trigger is not None:
+            try:
+                self.trigger.close()
+            except Exception as e:
+                logger.warning("Error closing trigger: {}", e)
 
     # ------------------------------------------------------------------ #
     #  Mode dispatch                                                     #
@@ -234,9 +322,24 @@ class DAggerCollectionSession:
         # mid-correction so the boundary lands on a clean autonomous frame.
         elapsed = time.time() - (self._episode_start_time or time.time())
         if elapsed >= self.episode_duration_s and not intervention:
+            if self.trigger is not None:
+                # Trigger-controlled mode: the duration cap is a safety net.
+                # The operator didn't label this episode within the cap, so
+                # we mark FAILURE and hand control back to them rather than
+                # silently auto-starting another episode.
+                logger.warning(
+                    "Episode hit duration cap ({:.1f}s) without an operator label — "
+                    "saving as FAILURE. Press SPACE for the next episode.",
+                    self.episode_duration_s,
+                )
+                self._finish_episode(success=False)
+                self._between_episodes = True
+                return
             logger.info(
                 "Rotating episode (elapsed={:.1f}s, episode_duration_s={:.1f}s)", elapsed, self.episode_duration_s
             )
+            # Legacy time-only mode: rotation implies success and auto-start
+            # of the next episode so the recorder never goes idle.
             self._finish_episode(success=True)
             # Start the next one immediately so the next tick has somewhere to
             # write — but only if we still have episodes to collect.  Otherwise
@@ -272,8 +375,7 @@ class DAggerCollectionSession:
             "intervention_count": self._episode_intervention_count,
         }
         self._completed.append(ep_info)
-        if success:
-            (episode_dir / "SUCCESS").touch()
+        (episode_dir / ("SUCCESS" if success else "FAILURE")).touch()
 
         target = self.num_episodes if self.num_episodes > 0 else "inf"
         logger.info(
@@ -294,12 +396,14 @@ class DAggerCollectionSession:
 
     def _print_summary(self) -> None:
         duration = time.time() - self._session_start
+        n_fail = self.episodes_completed - self.episodes_successful
         logger.info("=" * 50)
         logger.info("DAgger Collection Session Complete")
-        logger.info("  Mode: {}", "sentry" if self.record_autonomous else "corrections-only")
+        logger.info("  Mode: {}", "trigger" if self.trigger is not None else "time-rotation")
         logger.info("  Episodes collected: {}", self.episodes_completed)
         logger.info("  Episodes successful: {}", self.episodes_successful)
-        logger.info("  Episodes discarded: {}", self._discarded)
+        logger.info("  Episodes failed:     {}", n_fail)
+        logger.info("  Episodes discarded:  {}", self._discarded)
         logger.info("  Session duration: {:.1f}s", duration)
         if self._completed:
             session_dir = Path(self._completed[0]["episode_dir"]).parent
@@ -326,8 +430,9 @@ class DAggerCollectionSession:
         duration = 0.0
         if self.recorder.is_recording and self._episode_start_time is not None:
             duration = time.time() - self._episode_start_time
-        rate = self._episode_intervention_count / self._episode_step_count if self._episode_step_count > 0 else 0.0
-        controls = "[L pedal] pause/resume   [R pedal] correction"
+        controls = "[L pedal] pause/resume  [R pedal] correction" + (
+            "  [S] success  [SPACE] failure  [D] discard  [Q] quit" if self.trigger is not None else ""
+        )
         state = SessionState(
             recording=self.recorder.is_recording,
             episode_current=self.episodes_completed + (1 if self.recorder.is_recording else 0),

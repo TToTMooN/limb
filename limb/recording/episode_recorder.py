@@ -53,6 +53,11 @@ class EpisodeRecorder:
     auto_start: bool = False
     ee_frame_names: Optional[Dict[str, str]] = None
     robot_configs: Optional[Dict[str, Any]] = None
+    # Video codec passed to robocam.AsyncVideoWriter. "auto" picks hevc_nvenc when the
+    # encoder EXISTS — but NVENC also needs free VRAM at runtime: with the pi0.5 serve
+    # + SAM3 server resident (2026-07-07 22:47 run) every encoder OOM'd and all three
+    # videos saved EMPTY. Set "libx264" (CPU) for GPU-crowded sessions.
+    video_codec: str = "auto"
 
     def __post_init__(self) -> None:
         self._recording = False
@@ -193,6 +198,8 @@ class EpisodeRecorder:
             # non-DAgger recorder run still produces a valid phases.npy file
             # (all-autonomous) that downstream tooling can rely on existing.
             self._phases: List[str] = []
+            self._rewards: List[float] = []
+            self._successes: List[bool] = []
             self._correction_indices: List[int] = []
             self._arm_states = {}
             self._actions = {}
@@ -259,6 +266,11 @@ class EpisodeRecorder:
             self._interventions.append(derived_intervention)
             self._phases.append(str(phase))
             self._correction_indices.append(int(correction_idx))
+            # SubRL per-frame verifier labels (user 2026-07-08: the recording must be
+            # self-contained for auditing rollout success/failure): the agent stamps
+            # _reward/_success on every action; absent (non-SubRL agents) -> 0/False.
+            self._rewards.append(float(action.get("_reward", 0.0) or 0.0))
+            self._successes.append(bool(action.get("_success", False)))
 
             # Record arm states
             for arm_name, arm_obs in obs.arms.items():
@@ -268,6 +280,7 @@ class EpisodeRecorder:
                         "joint_vel": [],
                         "gripper_pos": [],
                         "ee_pose": [],
+                        "joint_eff": [],
                     }
                 self._arm_states[arm_name]["joint_pos"].append(arm_obs.joint_pos.copy())
                 self._arm_states[arm_name]["joint_vel"].append(arm_obs.joint_vel.copy())
@@ -275,6 +288,10 @@ class EpisodeRecorder:
                     self._arm_states[arm_name]["gripper_pos"].append(arm_obs.gripper_pos.copy())
                 if arm_obs.ee_pose is not None:
                     self._arm_states[arm_name]["ee_pose"].append(arm_obs.ee_pose.copy())
+                if arm_obs.joint_eff is not None:
+                    # motor-current efforts — needed to calibrate the SubRL gripper-effort
+                    # grasp thresholds (LOAD_LOW/LOAD_HOLD) from recorded grasp episodes
+                    self._arm_states[arm_name]["joint_eff"].append(arm_obs.joint_eff.copy())
 
             # Record actions (and the policy_pos shadow stream when present).
             # For composite agents like DAggerAgent the action dict can be {}
@@ -321,12 +338,52 @@ class EpisodeRecorder:
                 if cam_name not in self._writers:
                     h, w = cam_obs.rgb.shape[:2]
                     path = str(self._episode_dir / f"{cam_name}.mp4")
-                    writer = AsyncVideoWriter(path=path, width=w, height=h, fps=self.recording_fps)
-                    writer.start()
+                    writer = AsyncVideoWriter(path=path, width=w, height=h,
+                                              fps=self.recording_fps, codec=self.video_codec)
+                    # Spawn ffmpeg DETACHED from the terminal session: Ctrl+C is
+                    # delivered to the whole foreground group, so the encoders got
+                    # SIGINT ("Exiting normally, received signal 2", exit 255) before
+                    # the recorder's graceful stop() — harmless for the files but a
+                    # spurious WARNING per camera on every shutdown (23:40 run).
+                    # setpgid-after-exec is EPERM, so inject start_new_session at
+                    # spawn via a scoped patch of robocam's Popen.
+                    import robocam.video_writer as _rvw
+                    _orig_popen = _rvw.subprocess.Popen
+
+                    def _detached_popen(*a, _orig_popen=_orig_popen, **kw):
+                        kw.setdefault("start_new_session", True)
+                        # NEVER pipe ffmpeg's stderr without a reader (on-robot freezes
+                        # 2026-07-08, both at ~366 s / ~8350 frames): robocam passes
+                        # stderr=PIPE and nothing drains it, so ffmpeg's progress lines
+                        # fill the 64 KB pipe -> ffmpeg blocks -> stops reading stdin ->
+                        # writer queue (300) fills -> write() blocks -> the whole 30 Hz
+                        # control loop hangs. Encoder crashes still surface as
+                        # BrokenPipeError on stdin (robocam logs it and sets _failed).
+                        kw["stderr"] = _rvw.subprocess.DEVNULL
+                        return _orig_popen(*a, **kw)
+
+                    _rvw.subprocess.Popen = _detached_popen
+                    try:
+                        writer.start()
+                    finally:
+                        _rvw.subprocess.Popen = _orig_popen
                     self._writers[cam_name] = writer
                     self._cam_timestamps[cam_name] = []
-                self._writers[cam_name].write(cam_obs.rgb)
-                self._cam_timestamps[cam_name].append(cam_obs.timestamp)
+                # DROP the frame rather than block the control loop when the encoder
+                # falls behind (robocam's write() is a BLOCKING queue.put once its
+                # 300-frame buffer is full — the 2026-07-08 freeze amplifier).
+                w_ = self._writers[cam_name]
+                if getattr(w_, "_queue", None) is not None and w_._queue.full():
+                    # timestamp intentionally NOT appended: <cam>_timestamps.npy must
+                    # stay 1:1 with the frames actually encoded into the mp4.
+                    now = time.time()
+                    if now - getattr(self, "_drop_warn_t", 0.0) > 5.0:
+                        self._drop_warn_t = now
+                        logger.warning(f"video writer '{cam_name}' queue full — dropping "
+                                       "frames instead of stalling the control loop")
+                else:
+                    w_.write(cam_obs.rgb)
+                    self._cam_timestamps[cam_name].append(cam_obs.timestamp)
 
                 # NOTE: depth recording is intentionally not implemented yet.
                 # robocam.AsyncVideoWriter is hardcoded for 8-bit RGB input; a
@@ -370,6 +427,13 @@ class EpisodeRecorder:
                 str(episode_dir / "phase.npy"),
                 np.asarray(self._phases, dtype=np.dtype("U16")),
             )
+        if self._rewards:
+            # reward.npy / success.npy: per-frame verifier verdicts (SubRL) — a
+            # success rollout shows success=True + reward 1.0 on its terminal frames.
+            np.save(str(episode_dir / "reward.npy"),
+                    np.asarray(self._rewards, dtype=np.float32))
+            np.save(str(episode_dir / "success.npy"),
+                    np.asarray(self._successes, dtype=bool))
         if self._correction_indices:
             np.save(
                 str(episode_dir / "correction_index.npy"),

@@ -29,6 +29,6 @@ joint_limits:
   - [-1.35, 1.35]
   - [-1.50, 1.50]
   - [-2.00, 2.00]
-gripper_limits: [0.0, -5.2]
+gripper_limits: [0.12, -5.15] # follower-left (can_follow_l) measured range. leader_right inherits this; leader_left + follower_right override below / in their overlays.
 limit_gripper_force: 10.0
 # gripper_type: "yam_small"

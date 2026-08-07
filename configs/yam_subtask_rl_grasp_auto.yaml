@@ -1,0 +1,203 @@
+# Sub-task RL — right-arm VIAL GRASP RE-TRAINING with the lingbot AUTO-RESET
+# (user 2026-08-05). TRAINING LOOP ONLY — never shared with eval configs.
+#
+# vs configs/yam_subtask_rl_grasp.yaml (KEPT UNCHANGED as the HUMAN-reset-only
+# fallback mode — flip back to it if the auto-reset misbehaves):
+#   - human_reset_only: FALSE — the coding-agent auto-reset runs every episode:
+#       carry the held vial over a RANDOM (x,y) (pickup point +/- 3 cm) ->
+#       descend toward THIS EPISODE's live grasp height (place_z = the z the
+#       verifier recorded at the rollout's holding rising edge — NO fixed
+#       release height, user 2026-08-05: the gripper grasps a different point
+#       on the vial every rollout, so the height changes between episodes;
+#       place_z is only the initial waypoint and the descent continues below
+#       it on measurement) -> lingbot HEIGHT GATE decides the open (prot_m <=
+#       0.10: the vial tops the table plane by only its own ~7.5 cm = bottom
+#       AT the table; contact stall = the proprio backstop) -> open -> lift
+#       ABOVE the approach window (z_off 0.20 > approach_z_max 0.18).
+#     REAL-DATA RECALIBRATION (0728/0729 rollout journals): live closes run
+#     z 0.194-0.234 — the demo-era capture band (0.180) rejected them all, so
+#     both place_z AND the success rule's lift base silently fell back to
+#     stale constants; band now table_z+0.19 (rejects the observed 0.346
+#     mid-lift re-grip, accepts every real close).
+#     FALLEN WATCH: a sustained (~3 s) lingbot fallen verdict with nothing held
+#     freezes the arm (hold) and escalates to Call-Human. HUMAN remains the
+#     fallback for every unrecoverable (vial lost / below table / step budget).
+#   - detectors: lingbot_depth on ALL vial detect lanes (SAM3 misreads
+#     standing/fallen — its mask only catches the transparent tube's cap);
+#     SAM3 :8114 stays ONLY for the stand-veto rack lane ("stand:" key prefix).
+#   - selector: strict_wrist TRUE (lingbot refreshes ~1 s — the SAM3 staleness
+#     that forced strict_wrist false in 2026-07-27 training is gone) and
+#     stand_veto TRUE (the moved stand overlaps the pickup region).
+#
+# SERVICES (separate shells, GPU order matters):
+#   # 1. lingbot-depth (:8115) — FIRST on GPU (~2 GB), all vial detect lanes:
+#   ~/venvs/lingbot/bin/python ~/Desktop/research/SubRL-VLA/real_robot/services/serve_lingbot_depth.py --port 8115 --device cuda
+#   #    preflight: curl -s http://127.0.0.1:8115/health -> {"ok":true,"device":"cuda"}
+#   # 2. pi0.5 serve (:8111), XLA fraction 0.62 (lingbot's 2 GB):
+#   cd /home/ssc/Desktop/research/limb/openpi
+#   XLA_PYTHON_CLIENT_MEM_FRACTION=0.62 SUBRL_RETURN_EMBED=1 \
+#   uv run python scripts/serve_policy.py --port=8111 policy:checkpoint \
+#       --policy.config=pi05_yam_vial_4_30fps_aug \
+#       --policy.dir=$HOME/.cache/openpi/hf/yam-vial-aug-pi05-v1-10k
+#   # 3. SAM3 (:8114) — stand-veto rack lane only
+#   # 4. GRASP learner (:9101 + replay :9102) — FRESH v5 lineage (new journal):
+#   ~/venvs/sam3/bin/python ~/Desktop/research/SubRL-VLA/real_robot/services/subrl_rl_service.py \
+#       --replay-url http://127.0.0.1:9102 --port 9101 --device cuda \
+#       --skill grasp_right --run-name grasp_v5 --wandb-project subrl-yam-grasp
+#
+# SHIPPED DRY-RUN-SAFE: rl_client mode "dummy" (zero residual = pure frozen
+# pi0.5) so the FIRST sessions exercise the auto-reset loop end-to-end without
+# training. Watch: RESET place-back (release only after the lingbot height
+# gate), the fallen watch (tip a vial by hand -> arm freezes -> Call-Human),
+# NEAR_TABLE_PROT_M calibration in logs/perception_audit. Then flip mode:
+# "http" to train.
+# Launch: uv run limb record --config-path configs/yam_subtask_rl_grasp_auto.yaml configs/rl_collection.yaml
+
+_target_: limb.envs.launch.LaunchConfig
+hz: 30.0
+
+sensors:
+  cameras:
+    head_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "215122256240"
+    left_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "409122274543"
+    right_wrist_camera:
+      _target_: limb.sensors.cameras.camera.CameraNode
+      camera:
+        _target_: limb.sensors.cameras.realsense_camera.RealsenseCamera
+        serial_number: "409122274017"
+
+robots:
+  left:  ["robot_configs/yam/left.yaml"]
+  right: ["robot_configs/yam/left.yaml", "robot_configs/yam/right.yaml"]
+
+agent:
+  _target_: limb.agents.policy_learning.subtask.subtask_rl_agent.SubtaskRLAgent
+
+  vla:
+    _target_: limb.agents.policy_learning.policy_agent.YamPolicyAgent
+    client:
+      _target_: limb.agents.policy_learning.policy_client.OpenPIClient
+      host: "127.0.0.1"
+      port: 8111
+    obs_transform:
+      _target_: limb.agents.policy_learning.transforms.OpenPIObsTransform
+      state_keys: ["left-joint_pos", "left-gripper_pos", "right-joint_pos", "right-gripper_pos"]
+      image_keys:
+        cam_high: "head_camera-images-rgb"
+        cam_left_wrist: "left_wrist_camera-images-rgb"
+        cam_right_wrist: "right_wrist_camera-images-rgb"
+      image_size: [224, 224]
+      prompt: "pick up all vials and place them in the stand"
+    action_transform:
+      _target_: limb.agents.policy_learning.transforms.ActionTransform
+      arm_names: ["left", "right"]
+      joints_per_arm: 7
+      include_vel: false
+      gripper_clip: [0.0, 2.4]
+    action_horizon: 50
+    smoothing_window: 4
+    async_inference: true
+    inference_interval_s: 1.2
+    expose_rl_features: true
+
+  rl_client:
+    _target_: limb.agents.policy_learning.subtask.rl_policy_client.RLPolicyClient
+    # DRY-RUN-SAFE (see header): flip to "http" once the auto-reset is verified.
+    mode: "dummy"
+    url: "http://127.0.0.1:9101/infer"
+    action_dim: 7
+    fail_backoff_s: 2.0
+
+  machine:
+    _target_: limb.agents.policy_learning.subtask.mode_machine.SubtaskModeMachine
+    profile: "training"          # RESET <-> RL <-> HUMAN
+    min_mode_steps: 5
+    cooldown_steps: 5
+
+  phase_trigger:
+    _target_: limb.agents.dagger.FootPedalPhaseTrigger
+    device_path: "auto"
+    vendor_id: 0x3553
+    product_id: 0xb001
+    pause_resume_key: "KEY_A"
+    correction_key: "KEY_B"
+
+  verifiers:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_verifiers
+    table_z: 0.065
+    stable_frames: 23            # grasp success rule as trained (user 2026-07-28):
+    lift_m: 0.075                # >= 7.5 cm above grasp height, ~0.75 s sustained
+    success_image_confirm: false # proprio-authoritative (held vial is camera-invisible)
+    fallen_terminates: false     # fallen only blocks resume; the RESET-phase fallen
+                                 # watch (lingbot) is the new Call-Human path
+    # THE canonical detector block — all three copies in this file are IDENTICAL
+    # (make_vial_detector shares ONE instance per backend string; the FIRST
+    # construction's kwargs win). lingbot_depth = every vial detect lane (entry,
+    # cues, reset watch + height gate); "stand:" keys route to SAM3 by prefix.
+    detector: &lingbot_detector
+      _target_: limb.agents.policy_learning.subtask.perception.make_vial_detector
+      backend: "lingbot_depth"
+      request_timeout_s: 10.0
+      throttle_s: 1.0            # lingbot is fast (112 ms GPU) — every lane at 1 s
+      workers: 4
+      audit_dir: "logs/perception_audit"   # offline-gradable verdicts+frames
+      lane_throttles:
+        "stand:": 4.0            # the SAM3 rack/veto lane keeps its budget
+
+  # AUTO-RESET (user 2026-08-05) — the coding-agent EAP inverse with the lingbot
+  # height gate + fallen watch (full spec in the header + reset_policy.py).
+  reset_policy:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_reset
+    table_z: 0.065
+    control: "ik_servo"
+    seed: null                   # OS entropy; set an int only to reproduce placements
+    step_rad: 0.01               # half speed for the first auto-reset sessions
+    detector: *lingbot_detector
+
+  selector:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_selector
+    table_z: 0.065
+    start_frames: 3
+    approach_z_min: 0.03
+    approach_z_max: 0.18
+    strict_wrist: true           # lingbot's ~1 s verdicts make the strict gate viable
+    stand_veto: true             # the moved stand overlaps the pickup region
+    detector: *lingbot_detector
+
+  use_vla_approach: true         # boot approach only; then RL <-> RESET forever
+  human_reset_only: false        # AUTO-RESET LIVE (the old config keeps the human loop)
+  rl_timeout_steps: 300
+
+  escalator:
+    _target_: limb.agents.policy_learning.subtask.vials_artifacts.make_escalator
+
+  collector:
+    _target_: limb.agents.policy_learning.subtask.rollout_collector.RolloutCollector
+    out_dir: "recordings/subtask_rl_grasp_auto"
+    save_frames_every: 6
+    push_url: "http://127.0.0.1:9102/extend"
+    episode_log_url: "http://127.0.0.1:9101/episode"
+
+  skill_label: "rl1_grasp"
+  controlled_indices: [7, 8, 9, 10, 11, 12, 13]
+  left_mode: "vla"
+  chunk_len: 50
+
+  fk:
+    _target_: limb.agents.policy_learning.subtask.fk.EEPoseInjector
+    sides: ["right"]
+
+station_metadata:
+  world_frame: "left_arm"
+  extrinsics:
+    right_arm_extrinsic:
+      position: [0.0, -0.61, 0.0]
+      rotation: [1.0, 0.0, 0.0, 0.0]

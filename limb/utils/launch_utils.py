@@ -43,7 +43,7 @@ class _InterceptHandler(logging.Handler):
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
-def run_server_proc(api_cfg) -> multiprocessing.Process:
+def run_server_proc(api_cfg: Any) -> multiprocessing.Process:
     # Make sure we use spawn for CUDA
     ctx = multiprocessing.get_context("spawn")
     proc = ctx.Process(
@@ -123,6 +123,16 @@ def setup_logging(level: str = "INFO", log_dir: Optional[str] = None, stderr: bo
         )
 
     threading.excepthook = _thread_excepthook
+
+    # Freeze forensics (on-robot hangs 2026-07-08): `kill -USR1 <pid>` dumps every
+    # thread's Python stack to this process's log file — no ptrace/sudo needed.
+    try:
+        import faulthandler
+        import signal as _signal
+        faulthandler.register(_signal.SIGUSR1, file=open(log_path.with_suffix(".stacks.txt"), "a"),
+                              all_threads=True)
+    except Exception:
+        pass  # non-POSIX or restricted env — diagnostics only, never fatal
 
 
 def setup_can_interfaces():
