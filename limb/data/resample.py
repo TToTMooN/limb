@@ -28,16 +28,26 @@ Layout::
     detect_source_fps(timestamps)              → float, Hz
     resample_state_action(...)                 → (target_rel_t, state, action)
     resample_video(src_mp4, dst_mp4, ...)      → writes dst_mp4 at target fps
+    retime_video(src_mp4, dst_mp4, fps, n)     → frame i presented at exactly i / fps
 """
 
 from __future__ import annotations
 
+import json
+import subprocess
+from fractions import Fraction
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 from loguru import logger
+
+# mp4 track timescale used by retime_video: 1 µs ticks, so presentation times
+# are exact to well within LeRobot's default 1e-4 s frame-lookup tolerance.
+_RETIME_TIMESCALE = 1_000_000
+# Max allowed |pts_i - i / fps| after retiming.
+_RETIME_TOLERANCE_S = 1e-5
 
 
 def detect_source_fps(timestamps: np.ndarray) -> float:
@@ -201,3 +211,130 @@ def resample_video(
     cap.release()
     writer.stop()
     return len(needed)
+
+
+def _probe_frame_rate(path: Path) -> Optional[Fraction]:
+    """Return the nominal frame rate of the first video stream, or None."""
+    cmd = "ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0".split()
+    try:
+        result = subprocess.run([*cmd, str(path)], capture_output=True, text=True, timeout=30, check=False)
+        rate = Fraction(result.stdout.strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, ZeroDivisionError):
+        return None
+    return rate if rate > 0 else None
+
+
+def _probe_presentation_times(path: Path) -> Optional[np.ndarray]:
+    """Return the sorted packet presentation times (seconds) of the first video
+    stream, read from the container without decoding. None on failure."""
+    cmd = "ffprobe -v error -select_streams v:0 -show_entries stream=time_base:packet=pts -of json".split()
+    try:
+        result = subprocess.run([*cmd, str(path)], capture_output=True, text=True, timeout=120, check=False)
+        probe = json.loads(result.stdout)
+        time_base = Fraction(probe["streams"][0]["time_base"])
+        pts = np.array([p["pts"] for p in probe["packets"] if "pts" in p], dtype=np.int64)
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, KeyError, IndexError, ZeroDivisionError):
+        return None
+    return np.sort(pts) * float(time_base)
+
+
+def _max_grid_error(path: Path, fps: float, n_frames: int) -> Optional[float]:
+    """Max |pts_i - i / fps| over the first ``n_frames`` frames of ``path``.
+
+    None if the timestamps can't be read. A video with fewer than ``n_frames``
+    frames is checked over the frames it has (and a warning is logged): those
+    rows simply have no frame, as before.
+    """
+    pts = _probe_presentation_times(path)
+    if pts is None or len(pts) == 0:
+        return None
+    if len(pts) < n_frames:
+        logger.warning("{} has {} frames for {} steps; trailing steps have no video frame", path, len(pts), n_frames)
+    n = min(len(pts), n_frames)
+    return float(np.max(np.abs(pts[:n] - np.arange(n) / fps)))
+
+
+def _reencode_on_grid(src_path: Path, dst_path: Path, fps: float) -> None:
+    """Re-encode ``src_path`` frame-by-frame with a constant ``fps`` timeline.
+
+    Fallback for ffmpeg builds whose ``setts`` bitstream filter can't do the
+    lossless retime (it needs the ``time_base`` option). ``fps`` is passed to
+    ffmpeg as a fraction with denominator <= 1000, so it is exact only for
+    rates of that form (see convert_lerobot).
+    """
+    cap = cv2.VideoCapture(str(src_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open source video: {src_path}")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    rate = Fraction(float(fps)).limit_denominator(1000)
+    cmd = [
+        *"ffmpeg -loglevel error -y -f rawvideo -pix_fmt bgr24 -s".split(),
+        f"{w}x{h}",
+        "-r",
+        f"{rate.numerator}/{rate.denominator}",
+        *"-i - -an -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p".split(),
+        str(dst_path),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    assert proc.stdin is not None
+    try:
+        while True:
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            proc.stdin.write(bgr.tobytes())
+    finally:
+        cap.release()
+        proc.stdin.close()
+        proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg re-encode failed for {src_path} (exit {proc.returncode})")
+
+
+def retime_video(src_path: Path, dst_path: Path, fps: float, n_frames: int) -> str:
+    """Write ``src_path`` to ``dst_path`` so frame ``i`` is presented at exactly
+    ``i / fps`` seconds, without changing which frames are in it.
+
+    The recorder writes one frame per control tick (60-100 Hz) but encodes the
+    mp4 at ``recording_fps`` (30), so in the raw file frame ``i`` sits at
+    ``i / 30`` s. A dataset that labels row ``i`` with ``t = i / fps`` must
+    retime the video to match, or timestamp-based frame lookup (LeRobot)
+    returns frames from the wrong moment.
+
+    Tries a lossless stream-copy remux first (ffmpeg ``setts`` bitstream
+    filter) and falls back to a re-encode. Either way the output timestamps are
+    verified. Returns ``"remux"`` or ``"reencode"``.
+    """
+    src_rate = _probe_frame_rate(src_path)
+    if src_rate is not None:
+        # Source pts are k / src_rate (constant-rate recorder output): recover
+        # the frame index k, then place it at k / fps on a 1 µs time base.
+        index = f"round((%s-STARTPTS)*TB*{src_rate.numerator}/{src_rate.denominator})"
+        ticks = f"*{_RETIME_TIMESCALE}/{float(fps)!r}"
+        setts = (
+            f"setts=pts={index % 'PTS'}{ticks}:dts={index % 'DTS'}{ticks}"
+            f":duration=round({_RETIME_TIMESCALE}/{float(fps)!r}):time_base=1/{_RETIME_TIMESCALE}"
+        )
+        cmd = [
+            *"ffmpeg -loglevel error -y -i".split(),
+            str(src_path),
+            *"-map 0:v:0 -c copy -bsf:v".split(),
+            setts,
+            *f"-video_track_timescale {_RETIME_TIMESCALE}".split(),
+            str(dst_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            err = _max_grid_error(dst_path, fps, n_frames)
+            if err is not None and err <= _RETIME_TOLERANCE_S:
+                return "remux"
+            logger.warning("Lossless retime of {} is off by {} s; re-encoding instead", src_path, err)
+        else:
+            logger.warning("Lossless retime of {} failed ({}); re-encoding instead", src_path, result.stderr.strip())
+
+    _reencode_on_grid(src_path, dst_path, fps)
+    err = _max_grid_error(dst_path, fps, n_frames)
+    if err is None or err > _RETIME_TOLERANCE_S:
+        raise RuntimeError(f"could not retime {src_path} to {fps:.4f} fps (max timestamp error: {err} s)")
+    return "reencode"

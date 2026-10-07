@@ -169,7 +169,7 @@ uv run limb convert-lerobot \
   --input-dir recordings/pick_up_cube \
   --output-dir datasets/pick_up_cube \
   --task "pick up the grey cube and hand it over" \
-  --fps 30 \
+  --target-fps 30 \
   --success-only
 ```
 
@@ -179,7 +179,8 @@ uv run limb convert-lerobot \
 | `--output-dir`    | `str`      | _required_ | LeRobot dataset output directory                             |
 | `--task`          | `str?`     | `None`     | Task instruction string (defaults to per-episode metadata)   |
 | `--robot-type`    | `str`      | `yam`      | Written into `meta/info.json`                                |
-| `--fps`           | `int`      | `30`       | Target dataset FPS                                           |
+| `--target-fps`    | `int?`     | `None`     | Resample state/action/video to this rate. `None` keeps every recorded step, labels it at the episode's measured rate, and retimes the videos to match |
+| `--fps`           | `int?`     | `None`     | Deprecated alias for `--target-fps`                          |
 | `--success-only`  | `bool`     | `False`    | Skip episodes without the `SUCCESS` marker                   |
 | `--push-to-hub`   | `str?`     | `None`     | `username/repo` to push the dataset to HuggingFace Hub       |
 

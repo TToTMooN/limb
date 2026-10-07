@@ -123,7 +123,7 @@ recordings/red_cube_task/
     right_states.npz                      # same structure
     left_actions.npz                      # pos (N,7), optionally vel (N,7)
     right_actions.npz                     # same structure
-    left_wrist_camera.mp4                 # video at recording_fps
+    left_wrist_camera.mp4                 # one frame per control tick (container stamped at recording_fps)
     left_wrist_camera_timestamps.npy      # (N,) per-frame camera timestamps
     right_wrist_camera.mp4
     right_wrist_camera_timestamps.npy
