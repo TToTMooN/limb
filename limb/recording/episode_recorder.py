@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from loguru import logger
 from robocam import AsyncVideoWriter
+from robocam.video_writer import nvenc_available
 
 from limb.core.observation import Observation
 
@@ -76,8 +77,17 @@ class EpisodeRecorder:
         # Clean up any incomplete episodes from previous runs
         self._cleanup_incomplete_episodes()
 
+        # Warm robocam's NVENC probe (cached per process) in the background. On a GPU host it does a test
+        # encode with CUDA init; left to the first AsyncVideoWriter.start() it would stall record() in the
+        # control loop, and run here synchronously it would lengthen the gap after the safe-move.
+        threading.Thread(target=self._probe_video_codec, daemon=True, name="nvenc-probe").start()
+
         if self.auto_start:
             self.start_episode()
+
+    @staticmethod
+    def _probe_video_codec() -> None:
+        logger.info("Video codec: {}", "hevc_nvenc" if nvenc_available() else "libx264 (NVENC unavailable)")
 
     def _find_next_episode_count(self) -> int:
         """Find the next episode number by scanning existing directories."""
