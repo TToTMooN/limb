@@ -29,9 +29,9 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
-import shutil
 import subprocess
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -55,6 +55,7 @@ from limb.data.resample import (
     detect_source_fps,
     resample_state_action,
     resample_video,
+    retime_video,
 )
 
 CODEBASE_VERSION = "v3.0"
@@ -239,7 +240,13 @@ def main(args: Args) -> None:
             target_fps_override is not None
             and abs(target_fps_override - source_fps) / source_fps > 0.01
         )
-        output_fps = float(target_fps_override) if target_fps_override is not None else source_fps
+        # Without --target-fps, label at the measured rate rounded to a fraction
+        # with a small denominator (~1e-3 Hz), so the retimed videos can place
+        # frame i at exactly i / output_fps (see retime_video).
+        if target_fps_override is not None:
+            output_fps = float(target_fps_override)
+        else:
+            output_fps = float(Fraction(source_fps).limit_denominator(1000))
 
         # Optional DAgger phase metadata (None when episode lacks phase.npy).
         # These align 1:1 with the source state/action grid by construction.
@@ -280,9 +287,11 @@ def main(args: Args) -> None:
             if src_corr_idx is not None and len(src_corr_idx) > n_steps_out:
                 src_corr_idx = src_corr_idx[:n_steps_out]
 
-        # Videos: copy verbatim when no resampling, re-encode otherwise.
-        # Cameras are processed sequentially inside the worker so each
-        # worker only ever has 1 ffmpeg subprocess running at a time.
+        # Videos: re-encode when resampling; otherwise retime so frame i sits
+        # at i / output_fps like parquet row i. The raw mp4 holds one frame per
+        # control tick but is stamped at recording_fps, so it can't be copied
+        # verbatim. Cameras are processed sequentially inside the worker so
+        # each worker only ever has 1 ffmpeg subprocess running at a time.
         worker_video_size = 0
         worker_codec: Optional[str] = None
         for cam in episode["cameras"]:
@@ -294,7 +303,7 @@ def main(args: Args) -> None:
             if do_resample:
                 resample_video(src, dst, timestamps, tgt_rel, output_fps)
             else:
-                shutil.copy2(str(src), str(dst))
+                retime_video(src, dst, output_fps, n_steps_out)
             worker_video_size += dst.stat().st_size
             if worker_codec is None:
                 worker_codec = _probe_video_codec(dst)

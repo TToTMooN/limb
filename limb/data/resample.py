@@ -28,16 +28,30 @@ Layout::
     detect_source_fps(timestamps)              → float, Hz
     resample_state_action(...)                 → (target_rel_t, state, action)
     resample_video(src_mp4, dst_mp4, ...)      → writes dst_mp4 at target fps
+    retime_video(src_mp4, dst_mp4, fps, n)     → frame i presented at exactly i / fps
 """
 
 from __future__ import annotations
 
+import functools
+import json
+import subprocess
+from fractions import Fraction
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 from loguru import logger
+
+# retime_video puts frames on an mp4 track timescale where one frame is a whole
+# number of ticks (constant-rate stts), with at least this many ticks per second.
+_RETIME_MIN_TIMESCALE = 10_000
+# Bitstream filter that rewrites the codec's own frame timing (H.264/HEVC VUI)
+# for a remux, and its ticks per frame (H.264 counts field ticks: 2 per frame).
+_TIMING_BSF = {"h264": ("h264_metadata", 2), "hevc": ("hevc_metadata", 1)}
+# Max allowed |pts_i - i / fps| and |duration_i - 1 / fps| after retiming.
+_RETIME_TOLERANCE_S = 1e-5
 
 
 def detect_source_fps(timestamps: np.ndarray) -> float:
@@ -201,3 +215,195 @@ def resample_video(
     cap.release()
     writer.stop()
     return len(needed)
+
+
+def _fraction(value: str) -> Optional[Fraction]:
+    """Parse an ffprobe rate such as ``30/1``; None if missing, zero or malformed."""
+    try:
+        rate = Fraction(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return rate if rate > 0 else None
+
+
+def _probe_video(path: Path, packets: bool = False) -> Optional[dict]:
+    """ffprobe the first video stream of ``path`` without decoding.
+
+    Returns ``{"codec", "r_frame_rate", "avg_frame_rate"}`` and, with
+    ``packets``, ``"pts"`` (sorted, seconds) and ``"durations"`` (seconds, for
+    packets that report one). None if ffprobe is missing or the file can't be read.
+    """
+    entries = "stream=codec_name,r_frame_rate,avg_frame_rate,time_base" + (":packet=pts,duration" if packets else "")
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", entries, "-of", "json", str(path)]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
+        probe = json.loads(result.stdout)
+        stream = probe["streams"][0]
+        info = {
+            "codec": stream.get("codec_name"),
+            "r_frame_rate": _fraction(stream.get("r_frame_rate")),
+            "avg_frame_rate": _fraction(stream.get("avg_frame_rate")),
+        }
+        if packets:
+            time_base = float(Fraction(stream["time_base"]))
+            pkts = probe.get("packets", [])
+            info["pts"] = np.sort(np.array([p["pts"] for p in pkts if "pts" in p], dtype=np.int64)) * time_base
+            info["durations"] = np.array([p["duration"] for p in pkts if "duration" in p], dtype=np.int64) * time_base
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, KeyError, IndexError, ZeroDivisionError):
+        return None
+    return info
+
+
+@functools.lru_cache(maxsize=1)
+def _setts_prescale() -> str:
+    """``":prescale=1"`` if this ffmpeg's setts filter has the option, else ``""``.
+
+    From FFmpeg 8.1, setts rescales its result from the input to the output
+    time base unless ``prescale=1``; retime_video's expressions already give
+    output-time-base ticks. Older builds don't know the option.
+    """
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-h", "bsf=setts"], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+    return ":prescale=1" if "prescale" in result.stdout else ""
+
+
+def _retime_problem(path: Path, rate: Fraction, n_frames: int) -> Optional[str]:
+    """Check that ``path`` is a constant-rate ``rate`` video with frame ``i`` at
+    ``i / rate``; return what is wrong, or None if it is right.
+
+    Decoders find frames from different fields, so all of them must agree:
+    LeRobot's PyAV path uses packet pts, torchcodec's approximate mode uses
+    ``r_frame_rate`` and its exact mode uses packet durations. A video with
+    fewer than ``n_frames`` frames is checked over the frames it has (and a
+    warning is logged): those rows simply have no frame, as before.
+    """
+    info = _probe_video(path, packets=True)
+    if info is None or len(info["pts"]) == 0:
+        return "could not read its timestamps"
+    if info["r_frame_rate"] != rate:
+        return f"r_frame_rate is {info['r_frame_rate']}, expected {rate}"
+    avg = info["avg_frame_rate"]
+    if avg is None or abs(avg - rate) > rate * 1e-6:
+        return f"avg_frame_rate is {avg}, expected {rate}"
+    pts = info["pts"]
+    if len(pts) < n_frames:
+        logger.warning("{} has {} frames for {} steps; trailing steps have no video frame", path, len(pts), n_frames)
+    n = min(len(pts), n_frames)
+    grid_err = float(np.max(np.abs(pts[:n] - np.arange(n) / float(rate))))
+    if grid_err > _RETIME_TOLERANCE_S:
+        return f"frame times are off the 1/{rate} grid by up to {grid_err:.2e} s"
+    durations = info["durations"]
+    if len(durations) and float(np.max(np.abs(durations - 1 / float(rate)))) > _RETIME_TOLERANCE_S:
+        return f"packet durations range {durations.min():.6f}-{durations.max():.6f} s, expected {1 / float(rate):.6f}"
+    return None
+
+
+def _reencode_on_grid(src_path: Path, dst_path: Path, fps: float) -> None:
+    """Re-encode ``src_path`` frame-by-frame with a constant ``fps`` timeline.
+
+    Fallback for ffmpeg builds whose ``setts`` bitstream filter can't do the
+    lossless retime (it needs the ``time_base`` option). ``fps`` is passed to
+    ffmpeg as a fraction with denominator <= 1000, so it is exact only for
+    rates of that form (see convert_lerobot).
+    """
+    cap = cv2.VideoCapture(str(src_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open source video: {src_path}")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    rate = Fraction(float(fps)).limit_denominator(1000)
+    cmd = [
+        *"ffmpeg -loglevel error -y -f rawvideo -pix_fmt bgr24 -s".split(),
+        f"{w}x{h}",
+        "-r",
+        f"{rate.numerator}/{rate.denominator}",
+        *"-i - -an -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p".split(),
+        str(dst_path),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    assert proc.stdin is not None
+    broken = False  # ffmpeg exited early (e.g. no libx264 in this build); its error is on stderr
+    try:
+        while True:
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            try:
+                proc.stdin.write(bgr.tobytes())
+            except BrokenPipeError:
+                broken = True
+                break
+    finally:
+        cap.release()
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            broken = True
+        proc.wait()
+    if proc.returncode != 0 or broken:
+        raise RuntimeError(
+            f"ffmpeg re-encode failed for {src_path} (exit {proc.returncode}; see ffmpeg's error above)"
+        )
+
+
+def retime_video(src_path: Path, dst_path: Path, fps: float, n_frames: int) -> str:
+    """Write ``src_path`` to ``dst_path`` so frame ``i`` is presented at exactly
+    ``i / fps`` seconds, without changing which frames are in it.
+
+    The recorder writes one frame per control tick (60-100 Hz) but encodes the
+    mp4 at ``recording_fps`` (30), so in the raw file frame ``i`` sits at
+    ``i / 30`` s. A dataset that labels row ``i`` with ``t = i / fps`` must
+    retime the video to match, or timestamp-based frame lookup (LeRobot)
+    returns frames from the wrong moment.
+
+    Tries a lossless stream-copy remux first (ffmpeg ``setts`` plus the
+    codec's ``*_metadata`` bitstream filter, H.264/HEVC only) and falls back to
+    a re-encode. Either way the output timing is verified (pts, frame rate
+    fields and packet durations, see ``_retime_problem``). ``fps`` is used as a
+    fraction with denominator <= 1000, as convert_lerobot computes it.
+    Returns ``"remux"`` or ``"reencode"``.
+    """
+    rate = Fraction(float(fps)).limit_denominator(1000)
+    src = _probe_video(src_path)
+    src_rate = src["r_frame_rate"] if src else None
+    timing_bsf = _TIMING_BSF.get(src["codec"]) if src else None
+    if src_rate is not None and timing_bsf is not None:
+        # Source pts are k / src_rate (constant-rate recorder output): recover
+        # the frame index k and place it at k * step ticks, with one frame
+        # exactly `step` ticks so the track is constant-rate at `rate`. Then
+        # rewrite the stream's own timing, which still says the recording rate.
+        k = -(-_RETIME_MIN_TIMESCALE // rate.numerator)
+        timescale, step = rate.numerator * k, rate.denominator * k
+        index = f"round((%s-STARTPTS)*TB*{src_rate.numerator}/{src_rate.denominator})"
+        bsf_name, ticks_per_frame = timing_bsf
+        bsf = (
+            f"setts=pts={index % 'PTS'}*{step}:dts={index % 'DTS'}*{step}:duration={step}"
+            f":time_base=1/{timescale}{_setts_prescale()},"
+            f"{bsf_name}=tick_rate={ticks_per_frame * rate.numerator}/{rate.denominator}"
+        )
+        cmd = [
+            *"ffmpeg -loglevel error -y -i".split(),
+            str(src_path),
+            *"-map 0:v:0 -c copy -bsf:v".split(),
+            bsf,
+            *f"-video_track_timescale {timescale}".split(),
+            str(dst_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            problem = _retime_problem(dst_path, rate, n_frames)
+            if problem is None:
+                return "remux"
+            logger.warning("Lossless retime of {}: {}; re-encoding instead", src_path, problem)
+        else:
+            logger.warning("Lossless retime of {} failed ({}); re-encoding instead", src_path, result.stderr.strip())
+
+    _reencode_on_grid(src_path, dst_path, fps)
+    problem = _retime_problem(dst_path, rate, n_frames)
+    if problem is not None:
+        raise RuntimeError(f"could not retime {src_path} to {rate} fps: {problem}")
+    return "reencode"
