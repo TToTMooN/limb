@@ -33,6 +33,7 @@ Layout::
 
 from __future__ import annotations
 
+import functools
 import json
 import subprocess
 from fractions import Fraction
@@ -253,6 +254,23 @@ def _probe_video(path: Path, packets: bool = False) -> Optional[dict]:
     return info
 
 
+@functools.lru_cache(maxsize=1)
+def _setts_prescale() -> str:
+    """``":prescale=1"`` if this ffmpeg's setts filter has the option, else ``""``.
+
+    From FFmpeg 8.1, setts rescales its result from the input to the output
+    time base unless ``prescale=1``; retime_video's expressions already give
+    output-time-base ticks. Older builds don't know the option.
+    """
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-h", "bsf=setts"], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+    return ":prescale=1" if "prescale" in result.stdout else ""
+
+
 def _retime_problem(path: Path, rate: Fraction, n_frames: int) -> Optional[str]:
     """Check that ``path`` is a constant-rate ``rate`` video with frame ``i`` at
     ``i / rate``; return what is wrong, or None if it is right.
@@ -308,18 +326,28 @@ def _reencode_on_grid(src_path: Path, dst_path: Path, fps: float) -> None:
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     assert proc.stdin is not None
+    broken = False  # ffmpeg exited early (e.g. no libx264 in this build); its error is on stderr
     try:
         while True:
             ok, bgr = cap.read()
             if not ok:
                 break
-            proc.stdin.write(bgr.tobytes())
+            try:
+                proc.stdin.write(bgr.tobytes())
+            except BrokenPipeError:
+                broken = True
+                break
     finally:
         cap.release()
-        proc.stdin.close()
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            broken = True
         proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg re-encode failed for {src_path} (exit {proc.returncode})")
+    if proc.returncode != 0 or broken:
+        raise RuntimeError(
+            f"ffmpeg re-encode failed for {src_path} (exit {proc.returncode}; see ffmpeg's error above)"
+        )
 
 
 def retime_video(src_path: Path, dst_path: Path, fps: float, n_frames: int) -> str:
@@ -353,7 +381,8 @@ def retime_video(src_path: Path, dst_path: Path, fps: float, n_frames: int) -> s
         index = f"round((%s-STARTPTS)*TB*{src_rate.numerator}/{src_rate.denominator})"
         bsf_name, ticks_per_frame = timing_bsf
         bsf = (
-            f"setts=pts={index % 'PTS'}*{step}:dts={index % 'DTS'}*{step}:duration={step}:time_base=1/{timescale},"
+            f"setts=pts={index % 'PTS'}*{step}:dts={index % 'DTS'}*{step}:duration={step}"
+            f":time_base=1/{timescale}{_setts_prescale()},"
             f"{bsf_name}=tick_rate={ticks_per_frame * rate.numerator}/{rate.denominator}"
         )
         cmd = [
