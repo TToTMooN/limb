@@ -32,6 +32,8 @@ uv sync
 
 > **Submodule:** Includes [i2rt](https://github.com/i2rt-robotics/i2rt) (motor driver) under `dependencies/`. Clone with `--recurse-submodules`.
 
+> **ZED cameras:** `uv sync --extra all` (pulls `pyzed`; needs the ZED SDK). The default install does not include it.
+
 > **VR teleop:** XRoboToolkit SDK requires a separate install after `uv sync`:
 > ```bash
 > bash scripts/install_xrobotoolkit_sdk.sh

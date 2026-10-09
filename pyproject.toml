@@ -56,7 +56,7 @@ all = [
 i2rt = { path = "dependencies/i2rt", editable = true }
 # For local development, uncomment the path source and comment the git source:
 #robocam = { path = "../robocam", editable = true }
-robocam = { git = "https://github.com/TToTMooN/robocam.git", rev = "7284ce3a7fb762ac9497b95beea8782095c9a7a2" }
+robocam = { git = "https://github.com/TToTMooN/robocam.git", rev = "4e9f2eb3ae189a3550f8c7ad7f685ace75aa1147" }
 pyzed = { url = "https://download.stereolabs.com/zedsdk/5.2/whl/linux_x86_64/pyzed-5.2-cp311-cp311-linux_x86_64.whl" }
 
 [tool.uv]
