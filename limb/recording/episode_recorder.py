@@ -17,6 +17,7 @@ Post-processing to HDF5, LeRobot format, etc. is done by separate scripts.
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -79,7 +80,8 @@ class EpisodeRecorder:
 
         # Warm robocam's NVENC probe (cached per process) in the background. On a GPU host it does a test
         # encode with CUDA init; left to the first AsyncVideoWriter.start() it would stall record() in the
-        # control loop, and run here synchronously it would lengthen the gap after the safe-move.
+        # control loop. The recorder is built during config instantiation, before sensors, CAN and robots
+        # start, so the probe overlaps that startup instead of delaying it.
         threading.Thread(target=self._probe_video_codec, daemon=True, name="nvenc-probe").start()
 
         if self.auto_start:
@@ -87,6 +89,9 @@ class EpisodeRecorder:
 
     @staticmethod
     def _probe_video_codec() -> None:
+        if shutil.which("ffmpeg") is None:
+            logger.warning("ffmpeg not found on PATH: camera video cannot be recorded (install ffmpeg)")
+            return
         logger.info("Video codec: {}", "hevc_nvenc" if nvenc_available() else "libx264 (NVENC unavailable)")
 
     def _find_next_episode_count(self) -> int:
